@@ -302,11 +302,8 @@ async def parse_message_content(bot: Bot, group_id: int, raw_message) -> str:
                 try:
                     reply_msg = await bot.get_msg(message_id=reply_id)
                     r_time = reply_msg.get("time")
-                    r_sender = reply_msg.get("sender", {})
-                    r_qq = r_sender.get("nickname", "未知")
-                    r_card = (r_sender.get("card") or "").strip()
-                    r_name = f"{r_card}（QQ昵称：{r_qq}）" if r_card and r_card != r_qq else r_qq
-                    text_parts.append(f"[引用回复(时间：{r_time}，发言人：{r_name})]")
+                    r_user_id = str(reply_msg.get("sender", {}).get("user_id", "未知"))
+                    text_parts.append(f"[引用回复(时间：{r_time}，发言人：{r_user_id})]")
                 except Exception:
                     text_parts.append("[引用回复(获取信息失败)]")
             elif seg_type == "image":
@@ -750,13 +747,32 @@ async def handle_ai_chat(bot: Bot, event: Event):
         rows = []
     rows.reverse()
 
+    # 预加载本群所有用户昵称映射（供 convert_reply_time 将 QQ 号转为完整昵称）
+    user_display_map = {}
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
+            cursor = await db.execute(
+                'SELECT ug.user_id, ug.group_nickname, u.qq_nickname '
+                'FROM user_group_info ug '
+                'LEFT JOIN user_info u ON ug.user_id = u.user_id '
+                'WHERE ug.group_id = ?',
+                (event.group_id,)
+            )
+            async for uid, g_name, qq_name in cursor:
+                g_name = g_name or qq_name or uid
+                qq_name = qq_name or uid
+                if g_name != qq_name:
+                    user_display_map[uid] = f"{g_name}（QQ昵称：{qq_name}）"
+                else:
+                    user_display_map[uid] = g_name
+    except Exception:
+        pass
+
     def convert_reply_time(match):
-        try:
-            ts = int(match.group(1))
-            dt_str = datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M:%S")
-            return f"[引用回复(时间：{dt_str}，发言人：{match.group(2)})]"
-        except ValueError:
-            return match.group(0)
+        ts = int(match.group(1))
+        dt_str = datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M:%S")
+        speaker = user_display_map.get(match.group(2), match.group(2))
+        return f"[引用回复(时间：{dt_str}，发言人：{speaker})]"
 
     history_lines = []
     for row in rows:

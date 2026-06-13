@@ -328,20 +328,9 @@ async def parse_message_content(bot: Bot, group_id: int, raw_message) -> str:
             elif seg_type in ["json", "xml"]:
                 text_parts.append("[分享了卡片/链接]")
             elif seg_type == "at":
-                qq_id = seg_data.get('qq', '某人')
+                qq_id = str(seg_data.get('qq', ''))
                 if qq_id == "all":
                     text_parts.append("[@全体成员]")
-                elif str(qq_id).isdigit():
-                    try:
-                        # 主动向框架请求被艾特人的群信息
-                        member_info = await bot.get_group_member_info(group_id=group_id, user_id=int(qq_id),
-                                                                      no_cache=False)
-                        # 只取 nickname，忽略 card。如果都拿不到，退回到 qq_id
-                        name = member_info.get("nickname") or qq_id
-                        text_parts.append(f"[@{name}]")
-                    except Exception:
-                        # 如果获取失败（如退群、网络错误），兜底使用 QQ 号
-                        text_parts.append(f"[@{qq_id}]")
                 else:
                     text_parts.append(f"[@{qq_id}]")
             else:
@@ -476,22 +465,24 @@ async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tu
                 text_parts.append(seg_data.get("text", ""))
             elif seg_type == "at":
                 qq_id = str(seg_data.get('qq', ''))
-                # 排除 @ 机器人自己
-                if qq_id != str(bot.self_id):
-                    if qq_id == "all":
-                        text_parts.append("[@全体成员]")
-                    elif qq_id.isdigit():
-                        try:
-                            # 像前面一样，主动向框架请求被艾特人的群昵称
-                            member_info = await bot.get_group_member_info(group_id=group_id, user_id=int(qq_id),
-                                                                          no_cache=False)
-                            name = member_info.get("nickname") or qq_id
-                            text_parts.append(f"[@{name}]")
-                        except Exception:
-                            # 获取失败兜底用 QQ 号
-                            text_parts.append(f"[@{qq_id}]")
-                    else:
+                if qq_id == str(bot.self_id):
+                    pass  # 排除 @ 机器人自己
+                elif qq_id == "all":
+                    text_parts.append("[@全体成员]")
+                elif qq_id.isdigit():
+                    try:
+                        member_info = await bot.get_group_member_info(group_id=group_id, user_id=int(qq_id),
+                                                                      no_cache=False)
+                        qq_name = member_info.get("nickname") or qq_id
+                        card = (member_info.get("card") or "").strip()
+                        if card and card != qq_name:
+                            text_parts.append(f"[@{card}（QQ昵称：{qq_name}）]")
+                        else:
+                            text_parts.append(f"[@{qq_name}]")
+                    except Exception:
                         text_parts.append(f"[@{qq_id}]")
+                else:
+                    text_parts.append(f"[@{qq_id}]")
             elif seg_type == "image":
                 # 过滤主消息体中的表情包图片
                 summary = seg_data.get("summary", "").strip()
@@ -774,6 +765,10 @@ async def handle_ai_chat(bot: Bot, event: Event):
         speaker = user_display_map.get(match.group(2), match.group(2))
         return f"[引用回复(时间：{dt_str}，发言人：{speaker})]"
 
+    def convert_at(match):
+        uid = match.group(1)
+        return f"[@{user_display_map.get(uid, uid)}]"
+
     history_lines = []
     for row in rows:
         msg_time = datetime.datetime.fromtimestamp(row[0]).strftime("%m-%d %H:%M")
@@ -785,6 +780,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
             display_name = g_name
         text_content = row[3]
         text_content = re.sub(r'\[引用回复\(时间：(\d+)，发言人：(.*?)\)\]', convert_reply_time, text_content)
+        text_content = re.sub(r'\[@(\d+)\]', convert_at, text_content)
         history_lines.append(f"[{msg_time}] {display_name}: {text_content}")
 
     history_text = "\n".join(history_lines)

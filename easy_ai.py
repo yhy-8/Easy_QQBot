@@ -14,7 +14,7 @@ from nonebot.exception import FinishedException
 # ================= 配置区域 =================
 ALLOWED_GROUPS = [12345678] #白名单群
 DB_PATH = "/qqbot/chat_history.db"  # SQLite 数据库文件路径
-ENABLE_QUICK_ACK = True             # 是否开启收到提问后立刻回复“等待API回复...”的提示 (True/False)
+ENABLE_QUICK_ACK = True             # 是否开启收到提问后立刻回复“Waiting……”的提示 (True/False)
 
 ENABLE_AI_HISTORY_DECISION = True  # 是否开启 AI 动态决定历史记录条数 (True/False)
 DYNAMIC_HISTORY_MODEL = "default"   # 决定上下文条数的模型标识 (对应 MODELS_CONFIG 中的键名，如 "default", "A")

@@ -69,9 +69,9 @@ MODELS_CONFIG = {
 }
 
 # ================= 提示词模板 =================
-# 注意：{bot_name} 会在运行时被替换为机器人的 QQ 昵称
+# 注意：{bot_identity} 会在运行时被替换，格式为 "群昵称（QQ昵称：aaa）" 或仅昵称（两者相同时）
 # ---- 严肃模式：客观AI助手 ----
-SERIOUS_SYSTEM_PROMPT = """你是{bot_name}，群里的一位客观的AI助手，严格遵守以下【输出规范】进行回复：
+SERIOUS_SYSTEM_PROMPT = """你（{bot_identity}）是本群的一位客观的AI助手，严格遵守以下【输出规范】进行回复：
 1. 必须严格使用纯文本输出，绝对禁止使用任何 Markdown 语法（如加粗 **、列表 *、代码块 ``` 等）。
 2. 绝对禁止在回答中重复提问者的用户ID或昵称。
 3. 结合提供的群聊历史记录，作出答复。
@@ -80,7 +80,7 @@ SERIOUS_SYSTEM_PROMPT = """你是{bot_name}，群里的一位客观的AI助手�
 """
 
 # ---- 随性模式：语气轻松的AI助手 ----
-CASUAL_SYSTEM_PROMPT = """你是{bot_name}，群里的一个语气轻松的AI助手。请遵守以下规范：
+CASUAL_SYSTEM_PROMPT = """你（{bot_identity}）是本群的一个语气轻松的AI助手。请遵守以下规范：
 1. 必须使用纯文本输出，禁止使用 Markdown 语法（如加粗 **、列表 *、代码块 ``` 等）。
 2. 绝对禁止在回答中重复提问者的用户ID或昵称。
 3. 你的本质是工具，不是角色——语气可以自由随意一些，但不应塑造独立人设或主动扮演角色。
@@ -107,23 +107,32 @@ async def init_db():
         # 开启 WAL 模式
         await db.execute('PRAGMA journal_mode=WAL;')
 
-        # 创建全局昵称记录表
+        # 全局用户信息表（QQ昵称 + 全局最后发言时间）
         await db.execute('''
             CREATE TABLE IF NOT EXISTS "user_info" (
                 user_id TEXT PRIMARY KEY,
-                nickname TEXT,
-                last_speak_time INTEGER
+                qq_nickname TEXT,
+                last_global_speak_time INTEGER
+            )
+        ''')
+
+        # 每群每用户信息表（群昵称 + 该群最后发言时间）
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS "user_group_info" (
+                user_id TEXT,
+                group_id INTEGER,
+                group_nickname TEXT,
+                last_group_speak_time INTEGER,
+                PRIMARY KEY (user_id, group_id)
             )
         ''')
 
         for group_id in ALLOWED_GROUPS:
             table_name = f"group_{group_id}"
-            # 创建聊天记录表
             await db.execute(f'''
                 CREATE TABLE IF NOT EXISTS "{table_name}" (
                     message_id TEXT UNIQUE,
                     timestamp INTEGER,
-                    sender_name TEXT,
                     user_id TEXT,
                     content TEXT
                 )
@@ -291,11 +300,13 @@ async def parse_message_content(bot: Bot, group_id: int, raw_message) -> str:
             elif seg_type == "reply":
                 reply_id = seg_data.get("id")
                 try:
-                    # 向框架请求原消息，获取真实时间和发送者
                     reply_msg = await bot.get_msg(message_id=reply_id)
                     r_time = reply_msg.get("time")
-                    r_sender = reply_msg.get("sender", {}).get("nickname", "未知")
-                    text_parts.append(f"[引用回复(时间：{r_time}，发言人：{r_sender})]")
+                    r_sender = reply_msg.get("sender", {})
+                    r_qq = r_sender.get("nickname", "未知")
+                    r_card = (r_sender.get("card") or "").strip()
+                    r_name = f"{r_card}（QQ昵称：{r_qq}）" if r_card and r_card != r_qq else r_qq
+                    text_parts.append(f"[引用回复(时间：{r_time}，发言人：{r_name})]")
                 except Exception:
                     text_parts.append("[引用回复(获取信息失败)]")
             elif seg_type == "image":
@@ -353,17 +364,19 @@ async def send_and_save(bot: Bot, event: GroupMessageEvent, matcher, msg, is_fin
             bot_msg_id = send_result["message_id"]
             bot_timestamp = int(datetime.datetime.now().timestamp())
 
-            # 动态获取机器人的 QQ 昵称和 QQ 号
             try:
                 bot_info = await bot.get_login_info()
-                bot_name = bot_info.get("nickname", "AI助手")
+                bot_qq_name = bot_info.get("nickname", "AI助手")
                 bot_user_id = str(bot_info.get("user_id", bot.self_id))
+                # 获取机器人在该群的群昵称
+                bot_member = await bot.get_group_member_info(group_id=event.group_id, user_id=bot_info.get("user_id", bot.self_id), no_cache=False)
+                bot_group_name = bot_member.get("card", "").strip() or bot_qq_name
             except Exception:
-                bot_name = "AI助手"
+                bot_qq_name = "AI助手"
+                bot_group_name = "AI助手"
                 bot_user_id = str(bot.self_id)
 
-            # 增加 bot_user_id 传入
-            await insert_message_to_db(bot_msg_id, event.group_id, bot_timestamp, bot_name, bot_user_id, content_to_save)
+            await insert_message_to_db(bot_msg_id, event.group_id, bot_timestamp, bot_user_id, bot_qq_name, bot_group_name, content_to_save)
     except Exception as e:
         print(f"[AI Chat] 消息发送或存库失败: {e}")
 
@@ -372,7 +385,7 @@ async def send_and_save(bot: Bot, event: GroupMessageEvent, matcher, msg, is_fin
 
 
 # ========== 辅助函数：异步写入数据库 ==========
-async def insert_message_to_db(msg_id, group_id, timestamp, sender_name, user_id, content):
+async def insert_message_to_db(msg_id, group_id, timestamp, user_id, qq_nickname, group_nickname, content):
     if not content or group_id not in ALLOWED_GROUPS:
         return
 
@@ -380,18 +393,28 @@ async def insert_message_to_db(msg_id, group_id, timestamp, sender_name, user_id
     try:
         async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
             # 1. 写入聊天记录表
-            sql_chat = f'INSERT OR IGNORE INTO "{table_name}" (message_id, timestamp, sender_name, user_id, content) VALUES (?, ?, ?, ?, ?)'
-            await db.execute(sql_chat, (str(msg_id), int(timestamp), sender_name, str(user_id), content))
+            sql_chat = f'INSERT OR IGNORE INTO "{table_name}" (message_id, timestamp, user_id, content) VALUES (?, ?, ?, ?)'
+            await db.execute(sql_chat, (str(msg_id), int(timestamp), str(user_id), content))
 
-            # 2. 写入或更新昵称表
+            # 2. 更新全局用户信息表
             sql_user = '''
-                INSERT INTO "user_info" (user_id, nickname, last_speak_time)
+                INSERT INTO "user_info" (user_id, qq_nickname, last_global_speak_time)
                 VALUES (?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
-                    nickname=excluded.nickname,
-                    last_speak_time=excluded.last_speak_time
+                    qq_nickname=excluded.qq_nickname,
+                    last_global_speak_time=excluded.last_global_speak_time
             '''
-            await db.execute(sql_user, (str(user_id), sender_name, int(timestamp)))
+            await db.execute(sql_user, (str(user_id), qq_nickname, int(timestamp)))
+
+            # 3. 更新每群每用户信息表
+            sql_group_user = '''
+                INSERT INTO "user_group_info" (user_id, group_id, group_nickname, last_group_speak_time)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, group_id) DO UPDATE SET
+                    group_nickname=excluded.group_nickname,
+                    last_group_speak_time=excluded.last_group_speak_time
+            '''
+            await db.execute(sql_group_user, (str(user_id), int(group_id), group_nickname, int(timestamp)))
 
             await db.commit()
     except Exception as e:
@@ -490,7 +513,10 @@ async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tu
                 try:
                     reply_msg = await bot.get_msg(message_id=reply_id)
                     r_time_str = datetime.datetime.fromtimestamp(reply_msg.get("time", 0)).strftime("%m-%d %H:%M:%S")
-                    r_sender = reply_msg.get("sender", {}).get("nickname", "未知")
+                    r_sender = reply_msg.get("sender", {})
+                    r_qq = r_sender.get("nickname", "未知")
+                    r_card = (r_sender.get("card") or "").strip()
+                    r_sender = f"{r_card}（QQ昵称：{r_qq}）" if r_card and r_card != r_qq else r_qq
 
                     r_text_content = ""
                     for r_seg in reply_msg.get("message", []):
@@ -569,13 +595,14 @@ async def sync_history_on_startup(bot: Bot):
 
                     # 提取 sender 信息
                     sender = msg.get("sender", {})
-                    sender_name = sender.get("nickname", "未知用户")
+                    qq_nickname = sender.get("nickname", "未知用户")
+                    group_nickname = sender.get("card", "").strip() or qq_nickname
                     user_id = str(sender.get("user_id", "未知ID"))
 
                     content = await parse_message_content(bot, group_id, msg.get("message", ""))
 
                     if msg_id and content:
-                        await insert_message_to_db(msg_id, group_id, timestamp, sender_name, user_id, content)
+                        await insert_message_to_db(msg_id, group_id, timestamp, user_id, qq_nickname, group_nickname, content)
                         success_count += 1
                 except Exception as inner_e:
                     print(f"[AI Chat] 解析单条历史消息失败: {inner_e}")
@@ -598,11 +625,12 @@ async def record_chat_history(bot: Bot, event: Event):
     if event.is_tome():
         return
 
-    sender_name = event.sender.nickname if event.sender and event.sender.nickname else "未知用户"
+    qq_nickname = event.sender.nickname if event.sender and event.sender.nickname else "未知用户"
+    group_nickname = (event.sender.card or "").strip() or qq_nickname if event.sender else "未知用户"
     user_id = str(event.user_id)
     content = await parse_message_content(bot, event.group_id, event.original_message)
 
-    await insert_message_to_db(event.message_id, event.group_id, event.time, sender_name, user_id, content)
+    await insert_message_to_db(event.message_id, event.group_id, event.time, user_id, qq_nickname, group_nickname, content)
 
 
 # ========== 3. 处理用户的 @ 提问 ==========
@@ -618,9 +646,10 @@ async def handle_ai_chat(bot: Bot, event: Event):
         return
 
     # 抢在机器人回复前，强制先把用户的触发消息存库
-    sender_name = event.sender.nickname if event.sender and event.sender.nickname else "未知用户"
+    qq_nickname = event.sender.nickname if event.sender and event.sender.nickname else "未知用户"
+    group_nickname = (event.sender.card or "").strip() or qq_nickname if event.sender else "未知用户"
     user_msg_content = await parse_message_content(bot, event.group_id, event.original_message)
-    await insert_message_to_db(event.message_id, event.group_id, event.time, sender_name, str(event.user_id),user_msg_content)
+    await insert_message_to_db(event.message_id, event.group_id, event.time, str(event.user_id), qq_nickname, group_nickname, user_msg_content)
 
     # 如果只是引用而没有手动 @，则在此中断，不触发 AI 回复
     has_at = any(seg.type == "at" and str(seg.data.get("qq")) == str(bot.self_id)
@@ -682,7 +711,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
 
     # 4. 通过校验，立刻返回等待提示
     if ENABLE_QUICK_ACK:
-        ack_msg = MessageSegment.at(event.user_id) + f"（{model_information}）等待API回复……"
+        ack_msg = MessageSegment.at(event.user_id) + f"（{model_information}）Waiting……"
         await send_and_save(bot, event, chat_handler, ack_msg, is_finish=False)
 
     # 5. 提示已发出，开始读取本地图片转 Base64
@@ -694,16 +723,27 @@ async def handle_ai_chat(bot: Bot, event: Event):
                 base64_images.append(b64)
 
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    user_name = event.sender.nickname if event.sender and event.sender.nickname else "未知用户"
+    if group_nickname != qq_nickname:
+        user_name = f"{group_nickname}（QQ昵称：{qq_nickname}）"
+    else:
+        user_name = group_nickname
 
-    # 从数据库获取上下文历史
+    # 从数据库获取上下文历史（JOIN 获取两个昵称）
     dynamic_limit = await get_dynamic_history_length(event.group_id)
     table_name = f"group_{event.group_id}"
     rows = []
     try:
         async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
-            query = f'SELECT timestamp, sender_name, content FROM "{table_name}" WHERE message_id != ? ORDER BY timestamp DESC, rowid DESC LIMIT ?'
-            async with db.execute(query, (str(event.message_id), dynamic_limit)) as cursor:
+            query = f'''
+                SELECT g.timestamp, u.qq_nickname, ug.group_nickname, g.content
+                FROM "{table_name}" g
+                LEFT JOIN user_info u ON g.user_id = u.user_id
+                LEFT JOIN user_group_info ug ON g.user_id = ug.user_id AND ug.group_id = ?
+                WHERE g.message_id != ?
+                ORDER BY g.timestamp DESC, g.rowid DESC
+                LIMIT ?
+            '''
+            async with db.execute(query, (event.group_id, str(event.message_id), dynamic_limit)) as cursor:
                 rows = await cursor.fetchall()
     except Exception as e:
         print(f"[AI Chat]数据库提取异常： {e}")
@@ -721,14 +761,30 @@ async def handle_ai_chat(bot: Bot, event: Event):
     history_lines = []
     for row in rows:
         msg_time = datetime.datetime.fromtimestamp(row[0]).strftime("%m-%d %H:%M")
-        nname = row[1]
-        text_content = row[2]
+        qq_name = row[1] or "未知用户"
+        g_name = row[2] or qq_name
+        if g_name != qq_name:
+            display_name = f"{g_name}（QQ昵称：{qq_name}）"
+        else:
+            display_name = g_name
+        text_content = row[3]
         text_content = re.sub(r'\[引用回复\(时间：(\d+)，发言人：(.*?)\)\]', convert_reply_time, text_content)
-        history_lines.append(f"[{msg_time}] {nname}: {text_content}")
+        history_lines.append(f"[{msg_time}] {display_name}: {text_content}")
 
     history_text = "\n".join(history_lines)
 
-    system_rules = MODE_PROMPTS[selected_mode].format(bot_name=_bot_nickname)
+    # 获取机器人在该群的群昵称
+    try:
+        bot_member = await bot.get_group_member_info(group_id=event.group_id, user_id=bot.self_id, no_cache=False)
+        bot_group_name = bot_member.get("card", "").strip() or _bot_nickname
+    except Exception:
+        bot_group_name = _bot_nickname
+
+    if bot_group_name != _bot_nickname:
+        bot_identity = f"{bot_group_name}（QQ昵称：{_bot_nickname}）"
+    else:
+        bot_identity = _bot_nickname
+    system_rules = MODE_PROMPTS[selected_mode].format(bot_identity=bot_identity)
 
     if history_text.strip():
         final_prompt = (

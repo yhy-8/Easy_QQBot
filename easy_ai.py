@@ -533,6 +533,23 @@ async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tu
                             r_text_content += "[聊天记录]"
                         elif r_type == "node":
                             r_text_content += "[合并转发节点]"
+                        elif r_type == "at":
+                            r_qq_id = str(r_data.get("qq", ""))
+                            if r_qq_id == "all":
+                                r_text_content += "[@全体成员]"
+                            elif r_qq_id.isdigit():
+                                try:
+                                    r_member_info = await bot.get_group_member_info(group_id=group_id, user_id=int(r_qq_id), no_cache=False)
+                                    r_at_qq = r_member_info.get("nickname") or r_qq_id
+                                    r_at_card = (r_member_info.get("card") or "").strip()
+                                    if r_at_card and r_at_card != r_at_qq:
+                                        r_text_content += f"[@{r_at_card}（QQ昵称：{r_at_qq}）]"
+                                    else:
+                                        r_text_content += f"[@{r_at_qq}]"
+                                except Exception:
+                                    r_text_content += f"[@{r_qq_id}]"
+                            else:
+                                r_text_content += f"[@{r_qq_id}]"
                         elif r_type in ["json", "xml"]:
                             r_text_content += "[分享了卡片/链接]"
                         else:
@@ -900,7 +917,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
             async with session.post(current_api_url, headers=headers, json=payload, timeout=AI_CHAT_TIMEOUT) as resp:
                 if resp.status != 200:
                     err_msg = await resp.text()
-                    err_msg_text = MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）请求失败，状态码: {resp.status} \n错误信息: {err_msg}"
+                    err_msg_text = MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）请求失败 \n错误信息: {err_msg}"
                     await send_and_save(bot, event, chat_handler, err_msg_text, is_finish=True)
                     return
 
@@ -949,7 +966,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
         await send_and_save(bot, event, chat_handler, msg, is_finish=True)
 
     except asyncio.TimeoutError:
-        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id) + f"（模型：{model_config['name']}）请求超时，请稍后再试", is_finish=True)
+        await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id) + f"（模型：{model_config['name']}）请求超时", is_finish=True)
     except FinishedException:
         raise
     except Exception as e:

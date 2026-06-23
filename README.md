@@ -235,13 +235,12 @@ MODELS_CONFIG = {
 | `DEFAULT_MODE` | 无 /A /a 前缀时的默认模式 |
 | `THIRD_SEARCH_API_KEY` | 博查AI密钥，留空则不启用第三方搜索 |
 | `THIRD_SEARCH_COUNT` | 单次搜索返回给AI的结果条数 |
-| `MAX_SEARCH_ROUNDS` | 最大搜索轮数。AI 每轮可自行决定发起一次或多次搜索（多角度查询），轮次用尽后强制文本回复 |
+| `MAX_SEARCH_ROUNDS` | 最大搜索轮数。AI 每轮可自行决定发起一次或多次搜索，轮次用尽后强制文本回复 |
 | `MODELS_CONFIG.*.api_type` | `"openai"` 兼容绝大多数国产模型和中转站；`"gemini"` 用于 Google Gemini |
 | `MODELS_CONFIG.*.vision` | 开启后图片消息会转为 base64 传给模型 |
 | `MODELS_CONFIG.*.search` | 模型自带搜索 → 传原生搜索参数；不勾选 + 开启 `ENABLE_THIRD_SEARCH` → 走博查兜底 |
 | `ENABLE_THIRD_SEARCH` | 第三方搜索总开关。仅模型 `search: false` 时生效，开启后注册搜索工具让AI自行决定搜索词。需同时填写 `THIRD_SEARCH_API_KEY` |
 
-等待nonebot和napcat通信成功后，at对应qq即可触发ai回复。  
-模型支持的情况下，引用回复图片+at对应qq，或直接图片+at对应qq，可触发图片识别。
+等待nonebot和napcat通信成功后，at对应qq即可触发ai回复。
 
 **注意：挂载服务（systemctl）的时候需要留意虚拟环境，建议指定虚拟环境运行，本质还是 `nb run`**

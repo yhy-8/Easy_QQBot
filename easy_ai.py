@@ -1023,50 +1023,47 @@ async def handle_ai_chat(bot: Bot, event: Event):
                 # 动态解析返回值
                 if api_type == "openai":
                     if use_third_search:
-                        # 第三方搜索多轮循环：复用初始响应作为第 1 轮
+                        # 第三方搜索：先处理初始 tool_call，再进入多轮循环
                         messages = [{"role": "user", "content": user_message_content}]
                         total_search_count = 0
                         reply_text = ""
-                        current_data = data
+                        current_msg = data["choices"][0]["message"]
 
-                        for round_num in range(MAX_SEARCH_ROUNDS):
-                            current_msg = current_data["choices"][0]["message"]
+                        # 初始响应如果带 tool_call → 执行搜索，否则直接取文本
+                        if current_msg.get("tool_calls"):
+                            messages.append({"role": "assistant", "content": None, "tool_calls": current_msg["tool_calls"]})
+                            for tc in current_msg["tool_calls"]:
+                                if tc["function"]["name"] != "web_search":
+                                    continue
+                                try:
+                                    tc_args = json.loads(tc["function"]["arguments"])
+                                except Exception:
+                                    tc_args = {}
+                                tc_query = tc_args.get("query", user_input)
+                                tc_include = tc_args.get("include", "")
+                                tc_exclude = tc_args.get("exclude", "")
 
-                            # 非最后一轮且 AI 发起了搜索 → 执行搜索并继续
-                            if current_msg.get("tool_calls") and round_num < MAX_SEARCH_ROUNDS - 1:
-                                messages.append({"role": "assistant", "content": None, "tool_calls": current_msg["tool_calls"]})
+                                search_text, sc = await bocha_search(tc_query, include=tc_include, exclude=tc_exclude)
+                                total_search_count += sc
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tc["id"],
+                                    "content": search_text if search_text else "搜索无结果"
+                                })
 
-                                for tc in current_msg["tool_calls"]:
-                                    if tc["function"]["name"] != "web_search":
-                                        continue
-                                    try:
-                                        tc_args = json.loads(tc["function"]["arguments"])
-                                    except Exception:
-                                        tc_args = {}
-                                    tc_query = tc_args.get("query", user_input)
-                                    tc_include = tc_args.get("include", "")
-                                    tc_exclude = tc_args.get("exclude", "")
-
-                                    search_text, sc = await bocha_search(tc_query, include=tc_include, exclude=tc_exclude)
-                                    total_search_count += sc
-
-                                    messages.append({
-                                        "role": "tool",
-                                        "tool_call_id": tc["id"],
-                                        "content": search_text if search_text else "搜索无结果"
-                                    })
-
-                                # 发起下一轮请求（倒数第二轮不帶 tools，确保最后一轮强制文本回复）
+                            # 多轮搜索循环：AI 可继续修正搜索词
+                            for round_num in range(MAX_SEARCH_ROUNDS):
+                                is_last = (round_num == MAX_SEARCH_ROUNDS - 1)
                                 next_payload = {
                                     "model": model_config.get("model_id", "deepseek-chat"),
                                     "messages": messages,
                                     "stream": False
                                 }
-                                if round_num < MAX_SEARCH_ROUNDS - 2:
+                                if not is_last:
                                     next_payload["tools"] = [web_search_tool]
+
                                 async with session.post(current_api_url, headers=headers, json=next_payload, timeout=THIRD_SEARCH_TIMEOUT) as next_resp:
                                     if next_resp.status != 200:
-                                        # 请求失败不中断用户，告知AI后让其基于已有信息直接回复
                                         messages.append({"role": "user", "content": "[系统提示：上一轮请求失败，请基于当前已有的搜索结果和你的知识直接回复用户]"})
                                         fail_payload = {
                                             "model": model_config.get("model_id", "deepseek-chat"),
@@ -1078,13 +1075,39 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                                 fail_data = await fail_resp.json()
                                                 reply_text = fail_data["choices"][0]["message"]["content"] or ""
                                         break
-                                    current_data = await next_resp.json()
-                                continue
 
-                            # 无 tool_call 或最后一轮 → 取文本回复并结束
-                            reply_text = current_msg.get("content") or ""
+                                    current_data = await next_resp.json()
+                                    current_msg = current_data["choices"][0]["message"]
+
+                                    if current_msg.get("tool_calls") and not is_last:
+                                        # AI 要求再次搜索 → 执行搜索，继续循环
+                                        messages.append({"role": "assistant", "content": None, "tool_calls": current_msg["tool_calls"]})
+                                        for tc in current_msg["tool_calls"]:
+                                            if tc["function"]["name"] != "web_search":
+                                                continue
+                                            try:
+                                                tc_args = json.loads(tc["function"]["arguments"])
+                                            except Exception:
+                                                tc_args = {}
+                                            tc_query = tc_args.get("query", user_input)
+                                            tc_include = tc_args.get("include", "")
+                                            tc_exclude = tc_args.get("exclude", "")
+
+                                            search_text, sc = await bocha_search(tc_query, include=tc_include, exclude=tc_exclude)
+                                            total_search_count += sc
+                                            messages.append({
+                                                "role": "tool",
+                                                "tool_call_id": tc["id"],
+                                                "content": search_text if search_text else "搜索无结果"
+                                            })
+                                        continue
+                                    else:
+                                        reply_text = current_msg.get("content") or ""
+                                        reply_text = reply_text.strip()
+                                        break
+                        else:
+                            reply_text = current_msg.get("content")
                             reply_text = reply_text.strip()
-                            break
 
                         search_count = total_search_count
                     else:

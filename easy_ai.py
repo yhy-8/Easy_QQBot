@@ -4,6 +4,7 @@ import aiosqlite
 import re
 import asyncio
 import base64
+import json
 import random
 from pathlib import Path
 from nonebot import on_message, get_driver
@@ -29,6 +30,11 @@ IMAGE_BASE_DIR = ""
 
 DEFAULT_MODE = "casual"  # 无前缀时默认模式: "serious"(严肃) 或 "casual"(随性)
 
+# ===== 第三方搜索配置 =====
+THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key
+THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
+THIRD_SEARCH_COUNT = 10                                      # 单次搜索返回条数 (1-50)
+
 MODELS_CONFIG = {
     "default": {
         "api_key": "",
@@ -37,7 +43,8 @@ MODELS_CONFIG = {
         "api_type": "openai",
         "model_id": "deepseek-v4-flash",  # DeepSeek 需要在 body 传入这个
         "vision": False,
-        "search": False
+        "search": False,
+        "third_search": False
     },
     "A": {
         "api_key": "",
@@ -46,7 +53,8 @@ MODELS_CONFIG = {
         "api_type": "openai",
         "model_id": "deepseek-v4-pro",
         "vision": False,
-        "search": False
+        "search": False,
+        "third_search": False
     },
     "B": {
         "api_key": "",
@@ -55,7 +63,8 @@ MODELS_CONFIG = {
         "api_type": "gemini",
         "model_id": "gemini-3-flash",
         "vision": True,
-        "search": True
+        "search": True,
+        "third_search": False
     },
     "C": {
         "api_key": "",
@@ -64,7 +73,8 @@ MODELS_CONFIG = {
         "api_type": "gemini",
         "model_id": "gemini-3.1-pro",
         "vision": True,
-        "search": True
+        "search": True,
+        "third_search": False
     }
 }
 
@@ -576,6 +586,57 @@ async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tu
     return "".join(text_parts).strip(), image_ids
 
 
+# ========== 辅助函数：第三方搜索（博查AI） ==========
+async def bocha_search(query: str) -> tuple[str, int]:
+    """调用博查AI搜索API，返回 (格式化搜索文本, 结果数量)"""
+    if not THIRD_SEARCH_API_KEY or not query:
+        return "", 0
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {THIRD_SEARCH_API_KEY}"
+    }
+    body = {
+        "query": query,
+        "freshness": "noLimit",
+        "summary": True,
+        "count": THIRD_SEARCH_COUNT
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(THIRD_SEARCH_API_URL, headers=headers, json=body, timeout=30) as resp:
+                if resp.status != 200:
+                    return "", 0
+
+                data = await resp.json()
+                if data.get("code") != 200:
+                    return "", 0
+
+                web_pages = data.get("data", {}).get("webPages", {})
+                results = web_pages.get("value", [])
+                if not results:
+                    return "", 0
+
+                lines = ["[网络搜索结果]"]
+                for i, item in enumerate(results, 1):
+                    title = item.get("name", "").strip()
+                    url = item.get("url", "").strip()
+                    snippet = item.get("snippet", "").strip() or item.get("summary", "").strip()
+                    lines.append(f"{i}. 标题：{title}")
+                    lines.append(f"   链接：{url}")
+                    if snippet:
+                        lines.append(f"   摘要：{snippet}")
+
+                search_text = "\n".join(lines)
+                return search_text, len(results)
+
+    except asyncio.TimeoutError:
+        return "", 0
+    except Exception as e:
+        return "", 0
+
+
 # ========== 1. 机器人启动时自动拉取同步历史记录 ==========
 driver = get_driver()
 @driver.on_bot_connect
@@ -692,8 +753,9 @@ async def handle_ai_chat(bot: Bot, event: Event):
         current_api_url = model_config["api_url"]
     is_vision_enabled = model_config.get("vision", False)
     is_search_enabled = model_config.get("search", False)
+    use_third_search = (not is_search_enabled) and model_config.get("third_search", False)
     mode_label = "SER" if selected_mode == "serious" else "CAS"
-    model_information = f"{model_config['name']}{'，IMG' if is_vision_enabled else ''}{'，SRCH' if is_search_enabled else ''}，{mode_label}"
+    model_information = f"{model_config['name']}，{mode_label}"
 
     # 1. 提取富文本内容与图片 ID
     rich_user_input, image_ids = await extract_text_and_image_ids(bot, event.group_id, event.original_message)
@@ -880,6 +942,22 @@ async def handle_ai_chat(bot: Bot, event: Event):
                 payload["web_search"] = True
                 payload["network"] = True
 
+        elif use_third_search:
+            payload["tools"] = [{
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "搜索互联网获取实时信息，当你不确定或需要最新信息时使用",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "搜索关键词"}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }]
+
     elif api_type == "gemini":
         # Gemini 格式
         headers = {
@@ -925,18 +1003,54 @@ async def handle_ai_chat(bot: Bot, event: Event):
                 search_count = 0
                 # 动态解析返回值
                 if api_type == "openai":
-                    # Openai 格式解析
-                    reply_text = data["choices"][0]["message"]["content"].strip()
-                    if is_search_enabled:
-                        # 检查是否有标准的 tool_calls 记录
-                        tool_calls = data.get("choices", [{}])[0].get("message", {}).get("tool_calls", [])
-                        if tool_calls:
-                            search_count = len(tool_calls)
+                    if use_third_search:
+                        # 第三方搜索：检查 AI 是否发起了 tool_call
+                        message = data["choices"][0]["message"]
+                        if message.get("tool_calls"):
+                            tool_call = message["tool_calls"][0]
+                            try:
+                                args = json.loads(tool_call["function"]["arguments"])
+                            except Exception:
+                                args = {}
+                            query = args.get("query", user_input)
+
+                            search_text, search_count = await bocha_search(query)
+
+                            if search_text:
+                                followup_messages = [
+                                    {"role": "user", "content": user_message_content},
+                                    {"role": "assistant", "content": None, "tool_calls": message["tool_calls"]},
+                                    {"role": "tool", "tool_call_id": tool_call["id"], "content": search_text}
+                                ]
+                                followup_payload = {
+                                    "model": model_config.get("model_id", "deepseek-chat"),
+                                    "messages": followup_messages,
+                                    "stream": False
+                                }
+                                async with session.post(current_api_url, headers=headers, json=followup_payload, timeout=AI_CHAT_TIMEOUT) as resp2:
+                                    if resp2.status != 200:
+                                        err_msg = await resp2.text()
+                                        err_msg_text = MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）搜索后请求失败 \n错误信息: {err_msg}"
+                                        await send_and_save(bot, event, chat_handler, err_msg_text, is_finish=True)
+                                        return
+                                    data2 = await resp2.json()
+                                    reply_text = data2["choices"][0]["message"]["content"].strip()
+                            else:
+                                # 搜索无结果，使用 AI 原始回复
+                                reply_text = message.get("content", "").strip()
                         else:
-                            # 检查各家中转商/国产模型常用的自定义溯源数组 (如 citations)
-                            citations = data.get("citations", [])
-                            if citations:
-                                search_count = len(citations)
+                            reply_text = message.get("content", "").strip()
+                    else:
+                        # 原生 / 无搜索：标准解析
+                        reply_text = data["choices"][0]["message"]["content"].strip()
+                        if is_search_enabled:
+                            tool_calls = data.get("choices", [{}])[0].get("message", {}).get("tool_calls", [])
+                            if tool_calls:
+                                search_count = len(tool_calls)
+                            else:
+                                citations = data.get("citations", [])
+                                if citations:
+                                    search_count = len(citations)
 
                 elif api_type == "gemini":
                     # Gemini 格式解析
@@ -957,9 +1071,9 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                 search_count = len([c for c in chunks if "web" in c])
 
         prefix_hint = f"模型：{model_config['name']}，记录：{len(rows)}"
-        if is_vision_enabled:
+        if base64_images:
             prefix_hint += f"，图片：{len(base64_images)}"
-        if is_search_enabled:
+        if search_count > 0:
             prefix_hint += f"，搜索：{search_count}"
         prefix_hint += "\n"
         msg = MessageSegment.at(event.user_id) + "\n" + MessageSegment.text(f"{prefix_hint}{reply_text}")

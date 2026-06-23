@@ -34,7 +34,7 @@ DEFAULT_MODE = "casual"  # 无前缀时默认模式: "serious"(严肃) 或 "casu
 # ===== 第三方搜索配置 =====
 THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
-THIRD_SEARCH_COUNT = 20                                      # 单次搜索返回条数 (1-50)
+THIRD_SEARCH_COUNT = 25                                      # 单次搜索返回条数 (1-50)
 MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数（AI可多次修正搜索词）
 ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关 (True/False)，仅当模型无原生搜索时生效
 
@@ -587,7 +587,7 @@ async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tu
 
 
 # ========== 辅助函数：第三方搜索（博查AI） ==========
-async def bocha_search(query: str) -> tuple[str, int]:
+async def bocha_search(query: str, include: str = "", exclude: str = "") -> tuple[str, int]:
     """调用博查AI搜索API，返回 (格式化搜索文本, 结果数量)"""
     if not THIRD_SEARCH_API_KEY or not query:
         return "", 0
@@ -602,6 +602,10 @@ async def bocha_search(query: str) -> tuple[str, int]:
         "summary": True,
         "count": THIRD_SEARCH_COUNT
     }
+    if include:
+        body["include"] = include
+    if exclude:
+        body["exclude"] = exclude
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -622,11 +626,20 @@ async def bocha_search(query: str) -> tuple[str, int]:
                 for i, item in enumerate(results, 1):
                     title = item.get("name", "").strip()
                     url = item.get("url", "").strip()
-                    snippet = item.get("snippet", "").strip() or item.get("summary", "").strip()
+                    snippet = item.get("snippet", "").strip()
+                    summary = item.get("summary", "").strip()
+                    site_name = item.get("siteName", "").strip()
+                    date_pub = item.get("datePublished", "").strip()
                     lines.append(f"{i}. 标题：{title}")
                     lines.append(f"   链接：{url}")
+                    if site_name:
+                        lines.append(f"   来源：{site_name}")
+                    if date_pub:
+                        lines.append(f"   时间：{date_pub}")
                     if snippet:
                         lines.append(f"   摘要：{snippet}")
+                    if summary and summary != snippet:
+                        lines.append(f"   全文概要：{summary}")
 
                 search_text = "\n".join(lines)
                 return search_text, len(results)
@@ -951,7 +964,9 @@ async def handle_ai_chat(bot: Bot, event: Event):
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "query": {"type": "string", "description": "搜索关键词"}
+                            "query": {"type": "string", "description": "搜索关键词"},
+                            "include": {"type": "string", "description": "限定搜索的网站范围，多个域名用|或,分隔（如 qq.com|163.com）"},
+                            "exclude": {"type": "string", "description": "排除搜索的网站范围，多个域名用|或,分隔（如 zhihu.com|weibo.com）"}
                         },
                         "required": ["query"]
                     }
@@ -1007,26 +1022,34 @@ async def handle_ai_chat(bot: Bot, event: Event):
                         # 第三方搜索多轮循环：复用初始响应作为第 1 轮
                         messages = [{"role": "user", "content": user_message_content}]
                         total_search_count = 0
+                        search_call_count = 0
                         reply_text = ""
                         current_data = data
 
                         for round_num in range(MAX_SEARCH_ROUNDS):
                             current_msg = current_data["choices"][0]["message"]
 
-                            # 非最后一轮且 AI 发起了搜索 → 执行搜索并继续
-                            if current_msg.get("tool_calls") and round_num < MAX_SEARCH_ROUNDS - 1:
+                            # 非最后一轮、次数未超限、且 AI 发起了搜索 → 执行搜索并继续
+                            if (current_msg.get("tool_calls")
+                                    and search_call_count < MAX_SEARCH_ROUNDS
+                                    and round_num < MAX_SEARCH_ROUNDS - 1):
                                 messages.append({"role": "assistant", "content": None, "tool_calls": current_msg["tool_calls"]})
 
                                 for tc in current_msg["tool_calls"]:
                                     if tc["function"]["name"] != "web_search":
                                         continue
+                                    if search_call_count >= MAX_SEARCH_ROUNDS:
+                                        break
+                                    search_call_count += 1
                                     try:
                                         tc_args = json.loads(tc["function"]["arguments"])
                                     except Exception:
                                         tc_args = {}
                                     tc_query = tc_args.get("query", user_input)
+                                    tc_include = tc_args.get("include", "")
+                                    tc_exclude = tc_args.get("exclude", "")
 
-                                    search_text, sc = await bocha_search(tc_query)
+                                    search_text, sc = await bocha_search(tc_query, include=tc_include, exclude=tc_exclude)
                                     total_search_count += sc
 
                                     messages.append({
@@ -1034,6 +1057,22 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                         "tool_call_id": tc["id"],
                                         "content": search_text if search_text else "搜索无结果"
                                     })
+
+                                # 仅在搜索次数未达上限时发起下一轮
+                                if search_call_count >= MAX_SEARCH_ROUNDS:
+                                    # 已达上限，取当前已有文本（若有）；若无文本则再请求一次不带 tools 的回复
+                                    reply_text = current_msg.get("content") or ""
+                                    if not reply_text.strip():
+                                        final_payload = {
+                                            "model": model_config.get("model_id", "deepseek-chat"),
+                                            "messages": messages,
+                                            "stream": False
+                                        }
+                                        async with session.post(current_api_url, headers=headers, json=final_payload, timeout=AI_CHAT_TIMEOUT) as final_resp:
+                                            if final_resp.status == 200:
+                                                final_data = await final_resp.json()
+                                                reply_text = final_data["choices"][0]["message"]["content"] or ""
+                                    break
 
                                 # 发起下一轮请求（倒数第二轮不帶 tools，确保最后一轮强制文本回复）
                                 next_payload = {
@@ -1050,7 +1089,9 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                             "parameters": {
                                                 "type": "object",
                                                 "properties": {
-                                                    "query": {"type": "string", "description": "搜索关键词"}
+                                                    "query": {"type": "string", "description": "搜索关键词"},
+                                                    "include": {"type": "string", "description": "限定搜索的网站范围，多个域名用|或,分隔（如 qq.com|163.com）"},
+                                                    "exclude": {"type": "string", "description": "排除搜索的网站范围，多个域名用|或,分隔（如 zhihu.com|weibo.com）"}
                                                 },
                                                 "required": ["query"]
                                             }
@@ -1065,7 +1106,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                     current_data = await next_resp.json()
                                 continue
 
-                            # 无 tool_call 或最后一轮 → 取文本回复并结束
+                            # 无 tool_call 或最后一轮 / 已达限制 → 取文本回复并结束
                             reply_text = current_msg.get("content") or ""
                             reply_text = reply_text.strip()
                             break

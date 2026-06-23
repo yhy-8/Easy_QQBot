@@ -34,6 +34,7 @@ DEFAULT_MODE = "casual"  # 无前缀时默认模式: "serious"(严肃) 或 "casu
 THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
 THIRD_SEARCH_COUNT = 10                                      # 单次搜索返回条数 (1-50)
+MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数（AI可多次修正搜索词）
 
 MODELS_CONFIG = {
     "default": {
@@ -1004,42 +1005,73 @@ async def handle_ai_chat(bot: Bot, event: Event):
                 # 动态解析返回值
                 if api_type == "openai":
                     if use_third_search:
-                        # 第三方搜索：检查 AI 是否发起了 tool_call
-                        message = data["choices"][0]["message"]
-                        if message.get("tool_calls"):
-                            tool_call = message["tool_calls"][0]
-                            try:
-                                args = json.loads(tool_call["function"]["arguments"])
-                            except Exception:
-                                args = {}
-                            query = args.get("query", user_input)
+                        # 第三方搜索多轮循环：复用初始响应作为第 1 轮
+                        messages = [{"role": "user", "content": user_message_content}]
+                        total_search_count = 0
+                        reply_text = ""
+                        current_data = data
 
-                            search_text, search_count = await bocha_search(query)
+                        for round_num in range(MAX_SEARCH_ROUNDS):
+                            current_msg = current_data["choices"][0]["message"]
 
-                            if search_text:
-                                followup_messages = [
-                                    {"role": "user", "content": user_message_content},
-                                    {"role": "assistant", "content": None, "tool_calls": message["tool_calls"]},
-                                    {"role": "tool", "tool_call_id": tool_call["id"], "content": search_text}
-                                ]
-                                followup_payload = {
+                            # 非最后一轮且 AI 发起了搜索 → 执行搜索并继续
+                            if current_msg.get("tool_calls") and round_num < MAX_SEARCH_ROUNDS - 1:
+                                messages.append({"role": "assistant", "content": None, "tool_calls": current_msg["tool_calls"]})
+
+                                for tc in current_msg["tool_calls"]:
+                                    if tc["function"]["name"] != "web_search":
+                                        continue
+                                    try:
+                                        tc_args = json.loads(tc["function"]["arguments"])
+                                    except Exception:
+                                        tc_args = {}
+                                    tc_query = tc_args.get("query", user_input)
+
+                                    search_text, sc = await bocha_search(tc_query)
+                                    total_search_count += sc
+
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tc["id"],
+                                        "content": search_text if search_text else "搜索无结果"
+                                    })
+
+                                # 发起下一轮请求（倒数第二轮不帶 tools，确保最后一轮强制文本回复）
+                                next_payload = {
                                     "model": model_config.get("model_id", "deepseek-chat"),
-                                    "messages": followup_messages,
+                                    "messages": messages,
                                     "stream": False
                                 }
-                                async with session.post(current_api_url, headers=headers, json=followup_payload, timeout=AI_CHAT_TIMEOUT) as resp2:
-                                    if resp2.status != 200:
-                                        err_msg = await resp2.text()
-                                        err_msg_text = MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）搜索后请求失败 \n错误信息: {err_msg}"
+                                if round_num < MAX_SEARCH_ROUNDS - 2:
+                                    next_payload["tools"] = [{
+                                        "type": "function",
+                                        "function": {
+                                            "name": "web_search",
+                                            "description": "搜索互联网获取实时信息，当你不确定或需要最新信息时使用",
+                                            "parameters": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "query": {"type": "string", "description": "搜索关键词"}
+                                                },
+                                                "required": ["query"]
+                                            }
+                                        }
+                                    }]
+                                async with session.post(current_api_url, headers=headers, json=next_payload, timeout=AI_CHAT_TIMEOUT) as next_resp:
+                                    if next_resp.status != 200:
+                                        err_msg = await next_resp.text()
+                                        err_msg_text = MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）搜索第{round_num + 2}轮请求失败 \n错误信息: {err_msg}"
                                         await send_and_save(bot, event, chat_handler, err_msg_text, is_finish=True)
                                         return
-                                    data2 = await resp2.json()
-                                    reply_text = data2["choices"][0]["message"]["content"].strip()
-                            else:
-                                # 搜索无结果，使用 AI 原始回复
-                                reply_text = message.get("content", "").strip()
-                        else:
-                            reply_text = message.get("content", "").strip()
+                                    current_data = await next_resp.json()
+                                continue
+
+                            # 无 tool_call 或最后一轮 → 取文本回复并结束
+                            reply_text = current_msg.get("content") or ""
+                            reply_text = reply_text.strip()
+                            break
+
+                        search_count = total_search_count
                     else:
                         # 原生 / 无搜索：标准解析
                         reply_text = data["choices"][0]["message"]["content"].strip()

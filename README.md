@@ -119,18 +119,22 @@
 ```
 用户提问 "最近科技新闻"
     │
-    ├─→ AI收到问题 + 搜索工具定义
-    │      AI判断：需要搜索
+    ├─ 第 1 轮 ─→ AI收到问题 + 搜索工具
     │      AI决定搜索词："2026年6月科技新闻"
+    │      博查返回 8 条结果
     │
-    ├─→ 博查API搜索 "2026年6月科技新闻"
-    │      返回10条结果（标题+链接+摘要）
+    ├─ 第 2 轮 ─→ AI看到搜索结果，发现不够精确
+    │      AI修正搜索词："2026年6月 AI芯片 科技新闻"
+    │      博查返回 5 条结果
     │
-    └─→ AI收到原始问题 + 搜索结果
-           AI整合信息，给出最终回复
+    └─ 第 3 轮 ─→ AI收到两轮累计 13 条结果
+           整合信息，给出最终回复（显示 搜索：13）
 ```
 
-关键点：**AI 自己决定搜什么关键词**，不是机械地用用户原话搜索。比如用户问"那个事后来怎么样了"，AI 会结合上下文提炼出具体的搜索词。
+关键点：
+- **AI 自己决定搜什么关键词**，不是机械地用用户原话搜索
+- **AI 可以多轮修正搜索词**，第一轮搜偏了还有补救机会（受 `MAX_SEARCH_ROUNDS` 限制）
+- **搜索数累计**：回复中 "搜索：n" 是所有轮次的搜索结果总数
 
 ---
 
@@ -191,6 +195,7 @@ DEFAULT_MODE = "casual"            # 无前缀默认模式："serious"(严肃) �
 THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key (https://open.bocha.cn)
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
 THIRD_SEARCH_COUNT = 10                                      # 单次搜索返回条数 (1-50)
+MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数（AI可多次修正搜索词）
 
 # ===== 模型配置 =====
 MODELS_CONFIG = {
@@ -222,6 +227,7 @@ MODELS_CONFIG = {
 | `DEFAULT_MODE` | 无 /A /a 前缀时的默认模式 |
 | `THIRD_SEARCH_API_KEY` | 博查AI密钥，留空则不启用第三方搜索 |
 | `THIRD_SEARCH_COUNT` | 单次搜索返回给AI的结果条数 |
+| `MAX_SEARCH_ROUNDS` | 最大搜索轮数。第一轮搜错AI可修正搜索词重新搜，累计搜索数 |
 | `MODELS_CONFIG.*.api_type` | `"openai"` 兼容绝大多数国产模型和中转站；`"gemini"` 用于 Google Gemini |
 | `MODELS_CONFIG.*.vision` | 开启后图片消息会转为 base64 传给模型 |
 | `MODELS_CONFIG.*.search` | 模型自带搜索 → 传原生搜索参数；不勾选 + `third_search:true` → 走博查兜底 |

@@ -33,7 +33,7 @@ DEFAULT_MODE = "casual"  # 无前缀时默认模式: "serious"(严肃) 或 "casu
 # ===== 第三方搜索配置 =====
 THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
-THIRD_SEARCH_COUNT = 10                                      # 单次搜索返回条数 (1-50)
+THIRD_SEARCH_COUNT = 20                                      # 单次搜索返回条数 (1-50)
 MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数（AI可多次修正搜索词）
 
 MODELS_CONFIG = {

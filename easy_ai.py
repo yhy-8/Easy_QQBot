@@ -23,6 +23,7 @@ DYNAMIC_HISTORY_MODEL = "default"   # 决定上下文条数的模型标识 (对�
 
 DYNAMIC_HISTORY_TIMEOUT = 30  # 动态决定历史记录条数(前置AI)的超时时间（秒）
 AI_CHAT_TIMEOUT = 120         # 正式聊天(正式AI)的超时时间（秒）
+THIRD_SEARCH_TIMEOUT = 60   # 第三方搜索请求超时时间（秒）
 
 # 图片本地缓存目录配置
 # 1. 如果代码和 NapCat 在同一台电脑/同一个 Docker 容器内，请保持留空 ""，程序会自动读取绝对路径。
@@ -609,7 +610,7 @@ async def bocha_search(query: str, include: str = "", exclude: str = "") -> tupl
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(THIRD_SEARCH_API_URL, headers=headers, json=body, timeout=30) as resp:
+            async with session.post(THIRD_SEARCH_API_URL, headers=headers, json=body, timeout=THIRD_SEARCH_TIMEOUT) as resp:
                 if resp.status != 200:
                     return "", 0
 
@@ -723,6 +724,24 @@ async def handle_ai_chat(bot: Bot, event: Event):
 
     if event.group_id not in ALLOWED_GROUPS:
         return
+
+    # 搜索工具定义
+    web_search_tool = {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "搜索互联网获取实时信息，当你不确定或需要最新信息时使用",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词"},
+                    "include": {"type": "string", "description": "限定搜索的网站范围，多个域名用|或,分隔（如 qq.com|163.com）"},
+                    "exclude": {"type": "string", "description": "排除搜索的网站范围，多个域名用|或,分隔（如 zhihu.com|weibo.com）"}
+                },
+                "required": ["query"]
+            }
+        }
+    }
 
     # 抢在机器人回复前，强制先把用户的触发消息存库
     qq_nickname = event.sender.nickname if event.sender and event.sender.nickname else "未知用户"
@@ -956,22 +975,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
                 payload["network"] = True
 
         elif use_third_search:
-            payload["tools"] = [{
-                "type": "function",
-                "function": {
-                    "name": "web_search",
-                    "description": "搜索互联网获取实时信息，当你不确定或需要最新信息时使用",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "搜索关键词"},
-                            "include": {"type": "string", "description": "限定搜索的网站范围，多个域名用|或,分隔（如 qq.com|163.com）"},
-                            "exclude": {"type": "string", "description": "排除搜索的网站范围，多个域名用|或,分隔（如 zhihu.com|weibo.com）"}
-                        },
-                        "required": ["query"]
-                    }
-                }
-            }]
+            payload["tools"] = [web_search_tool]
 
     elif api_type == "gemini":
         # Gemini 格式
@@ -1022,25 +1026,19 @@ async def handle_ai_chat(bot: Bot, event: Event):
                         # 第三方搜索多轮循环：复用初始响应作为第 1 轮
                         messages = [{"role": "user", "content": user_message_content}]
                         total_search_count = 0
-                        search_call_count = 0
                         reply_text = ""
                         current_data = data
 
                         for round_num in range(MAX_SEARCH_ROUNDS):
                             current_msg = current_data["choices"][0]["message"]
 
-                            # 非最后一轮、次数未超限、且 AI 发起了搜索 → 执行搜索并继续
-                            if (current_msg.get("tool_calls")
-                                    and search_call_count < MAX_SEARCH_ROUNDS
-                                    and round_num < MAX_SEARCH_ROUNDS - 1):
+                            # 非最后一轮且 AI 发起了搜索 → 执行搜索并继续
+                            if current_msg.get("tool_calls") and round_num < MAX_SEARCH_ROUNDS - 1:
                                 messages.append({"role": "assistant", "content": None, "tool_calls": current_msg["tool_calls"]})
 
                                 for tc in current_msg["tool_calls"]:
                                     if tc["function"]["name"] != "web_search":
                                         continue
-                                    if search_call_count >= MAX_SEARCH_ROUNDS:
-                                        break
-                                    search_call_count += 1
                                     try:
                                         tc_args = json.loads(tc["function"]["arguments"])
                                     except Exception:
@@ -1058,22 +1056,6 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                         "content": search_text if search_text else "搜索无结果"
                                     })
 
-                                # 仅在搜索次数未达上限时发起下一轮
-                                if search_call_count >= MAX_SEARCH_ROUNDS:
-                                    # 已达上限，取当前已有文本（若有）；若无文本则再请求一次不带 tools 的回复
-                                    reply_text = current_msg.get("content") or ""
-                                    if not reply_text.strip():
-                                        final_payload = {
-                                            "model": model_config.get("model_id", "deepseek-chat"),
-                                            "messages": messages,
-                                            "stream": False
-                                        }
-                                        async with session.post(current_api_url, headers=headers, json=final_payload, timeout=AI_CHAT_TIMEOUT) as final_resp:
-                                            if final_resp.status == 200:
-                                                final_data = await final_resp.json()
-                                                reply_text = final_data["choices"][0]["message"]["content"] or ""
-                                    break
-
                                 # 发起下一轮请求（倒数第二轮不帶 tools，确保最后一轮强制文本回复）
                                 next_payload = {
                                     "model": model_config.get("model_id", "deepseek-chat"),
@@ -1081,32 +1063,25 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                     "stream": False
                                 }
                                 if round_num < MAX_SEARCH_ROUNDS - 2:
-                                    next_payload["tools"] = [{
-                                        "type": "function",
-                                        "function": {
-                                            "name": "web_search",
-                                            "description": "搜索互联网获取实时信息，当你不确定或需要最新信息时使用",
-                                            "parameters": {
-                                                "type": "object",
-                                                "properties": {
-                                                    "query": {"type": "string", "description": "搜索关键词"},
-                                                    "include": {"type": "string", "description": "限定搜索的网站范围，多个域名用|或,分隔（如 qq.com|163.com）"},
-                                                    "exclude": {"type": "string", "description": "排除搜索的网站范围，多个域名用|或,分隔（如 zhihu.com|weibo.com）"}
-                                                },
-                                                "required": ["query"]
-                                            }
-                                        }
-                                    }]
-                                async with session.post(current_api_url, headers=headers, json=next_payload, timeout=AI_CHAT_TIMEOUT) as next_resp:
+                                    next_payload["tools"] = [web_search_tool]
+                                async with session.post(current_api_url, headers=headers, json=next_payload, timeout=THIRD_SEARCH_TIMEOUT) as next_resp:
                                     if next_resp.status != 200:
-                                        err_msg = await next_resp.text()
-                                        err_msg_text = MessageSegment.at(event.user_id) + f"\n（模型：{model_config['name']}）搜索第{round_num + 2}轮请求失败 \n错误信息: {err_msg}"
-                                        await send_and_save(bot, event, chat_handler, err_msg_text, is_finish=True)
-                                        return
+                                        # 请求失败不中断用户，告知AI后让其基于已有信息直接回复
+                                        messages.append({"role": "user", "content": "[系统提示：上一轮请求失败，请基于当前已有的搜索结果和你的知识直接回复用户]"})
+                                        fail_payload = {
+                                            "model": model_config.get("model_id", "deepseek-chat"),
+                                            "messages": messages,
+                                            "stream": False
+                                        }
+                                        async with session.post(current_api_url, headers=headers, json=fail_payload, timeout=THIRD_SEARCH_TIMEOUT) as fail_resp:
+                                            if fail_resp.status == 200:
+                                                fail_data = await fail_resp.json()
+                                                reply_text = fail_data["choices"][0]["message"]["content"] or ""
+                                        break
                                     current_data = await next_resp.json()
                                 continue
 
-                            # 无 tool_call 或最后一轮 / 已达限制 → 取文本回复并结束
+                            # 无 tool_call 或最后一轮 → 取文本回复并结束
                             reply_text = current_msg.get("content") or ""
                             reply_text = reply_text.strip()
                             break

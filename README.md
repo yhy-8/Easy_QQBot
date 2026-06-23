@@ -199,8 +199,9 @@ DEFAULT_MODE = "casual"            # 无前缀默认模式："serious"(严肃) �
 # ===== 第三方搜索（博查AI）=====
 THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key (https://open.bocha.cn)
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
-THIRD_SEARCH_COUNT = 10                                      # 单次搜索返回条数 (1-50)
+THIRD_SEARCH_COUNT = 25                                      # 单次搜索返回条数 (1-50)
 MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数（AI可多次修正搜索词）
+THIRD_SEARCH_TIMEOUT = 30                                   # 第三方搜索请求超时（秒），覆盖博查API调用及后续AI轮次
 ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关，仅当模型无原生搜索时生效
 
 # ===== 模型配置 =====
@@ -227,12 +228,14 @@ MODELS_CONFIG = {
 | `ENABLE_QUICK_ACK` | 是否先回复"Waiting……"提示，缓解等待焦虑 |
 | `ENABLE_AI_HISTORY_DECISION` | 开启后由AI根据群聊活跃度动态决定读取多少条历史 |
 | `DYNAMIC_HISTORY_MODEL` | 上述决策使用的模型，通常用最便宜的模型 |
-| `DYNAMIC_HISTORY_TIMEOUT` / `AI_CHAT_TIMEOUT` | 超时秒数，前者用于前置决策，后者用于正式回复 |
+| `DYNAMIC_HISTORY_TIMEOUT` | 前置决策AI超时秒数 |
+| `AI_CHAT_TIMEOUT` | 正式聊天(首轮请求)超时秒数 |
+| `THIRD_SEARCH_TIMEOUT` | 第三方搜索超时秒数|
 | `IMAGE_BASE_DIR` | 图片路径：同机留空；跨Docker填容器内挂载的绝对路径 |
 | `DEFAULT_MODE` | 无 /A /a 前缀时的默认模式 |
 | `THIRD_SEARCH_API_KEY` | 博查AI密钥，留空则不启用第三方搜索 |
 | `THIRD_SEARCH_COUNT` | 单次搜索返回给AI的结果条数 |
-| `MAX_SEARCH_ROUNDS` | 最大搜索次数（非轮数）。程序追踪实际 bocha_search API 调用次数，达到上限后停止搜索，防止 AI 一轮多发导致超量 |
+| `MAX_SEARCH_ROUNDS` | 最大搜索轮数。AI 每轮可自行决定发起一次或多次搜索（多角度查询），轮次用尽后强制文本回复 |
 | `MODELS_CONFIG.*.api_type` | `"openai"` 兼容绝大多数国产模型和中转站；`"gemini"` 用于 Google Gemini |
 | `MODELS_CONFIG.*.vision` | 开启后图片消息会转为 base64 传给模型 |
 | `MODELS_CONFIG.*.search` | 模型自带搜索 → 传原生搜索参数；不勾选 + 开启 `ENABLE_THIRD_SEARCH` → 走博查兜底 |

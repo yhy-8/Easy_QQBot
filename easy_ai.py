@@ -23,7 +23,6 @@ DYNAMIC_HISTORY_MODEL = "default"   # 决定上下文条数的模型标识 (对�
 
 DYNAMIC_HISTORY_TIMEOUT = 30  # 动态决定历史记录条数(前置AI)的超时时间（秒）
 AI_CHAT_TIMEOUT = 120         # 正式聊天(正式AI)的超时时间（秒）
-THIRD_SEARCH_TIMEOUT = 30   # 第三方搜索请求超时时间（秒）
 
 # 图片本地缓存目录配置
 # 1. 如果代码和 NapCat 在同一台电脑/同一个 Docker 容器内，请保持留空 ""，程序会自动读取绝对路径。
@@ -36,6 +35,7 @@ DEFAULT_MODE = "casual"  # 无前缀时默认模式: "serious"(严肃) 或 "casu
 THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
 THIRD_SEARCH_COUNT = 25                                      # 单次搜索返回条数 (1-50)
+THIRD_SEARCH_TIMEOUT = 30                                    # 第三方搜索请求超时时间（秒）
 MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数（AI可多次修正搜索词）
 ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关 (True/False)，仅当模型无原生搜索时生效
 

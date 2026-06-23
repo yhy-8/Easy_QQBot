@@ -13,6 +13,7 @@ from nonebot.adapters.onebot.v11 import Bot, Event, MessageSegment, GroupMessage
 from nonebot.exception import FinishedException
 
 # ================= 配置区域 =================
+# ===== 基础配置 =====
 ALLOWED_GROUPS = [12345678] #白名单群
 DB_PATH = "/qqbot/chat_history.db"  # SQLite 数据库文件路径
 ENABLE_QUICK_ACK = True             # 是否开启收到提问后立刻回复“Waiting……”的提示 (True/False)
@@ -35,7 +36,9 @@ THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
 THIRD_SEARCH_COUNT = 20                                      # 单次搜索返回条数 (1-50)
 MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数（AI可多次修正搜索词）
+ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关 (True/False)，仅当模型无原生搜索时生效
 
+# ===== 模型配置 =====
 MODELS_CONFIG = {
     "default": {
         "api_key": "",
@@ -44,8 +47,7 @@ MODELS_CONFIG = {
         "api_type": "openai",
         "model_id": "deepseek-v4-flash",  # DeepSeek 需要在 body 传入这个
         "vision": False,
-        "search": False,
-        "third_search": False
+        "search": False
     },
     "A": {
         "api_key": "",
@@ -54,8 +56,7 @@ MODELS_CONFIG = {
         "api_type": "openai",
         "model_id": "deepseek-v4-pro",
         "vision": False,
-        "search": False,
-        "third_search": False
+        "search": False
     },
     "B": {
         "api_key": "",
@@ -64,8 +65,7 @@ MODELS_CONFIG = {
         "api_type": "gemini",
         "model_id": "gemini-3-flash",
         "vision": True,
-        "search": True,
-        "third_search": False
+        "search": True
     },
     "C": {
         "api_key": "",
@@ -74,8 +74,7 @@ MODELS_CONFIG = {
         "api_type": "gemini",
         "model_id": "gemini-3.1-pro",
         "vision": True,
-        "search": True,
-        "third_search": False
+        "search": True
     }
 }
 
@@ -754,7 +753,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
         current_api_url = model_config["api_url"]
     is_vision_enabled = model_config.get("vision", False)
     is_search_enabled = model_config.get("search", False)
-    use_third_search = (not is_search_enabled) and model_config.get("third_search", False)
+    use_third_search = (not is_search_enabled) and ENABLE_THIRD_SEARCH and THIRD_SEARCH_API_KEY
     mode_label = "SER" if selected_mode == "serious" else "CAS"
     model_information = f"{model_config['name']}，{mode_label}"
 

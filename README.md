@@ -112,8 +112,8 @@
 
 ### 搜索方式优先级
 1. **模型原生搜索**（`search: true`）→ 模型自带联网能力，直接调用模型内置搜索
-2. **第三方搜索**（`search: false` + `third_search: true`）→ 注册搜索工具给AI，AI自主决定搜索关键词，由博查API执行搜索，结果返回AI整合
-3. **无搜索**（两者皆 false）→ 纯文本对话
+2. **第三方搜索**（`search: false` + 全局 `ENABLE_THIRD_SEARCH = True`）→ 注册搜索工具给AI，AI自主决定搜索关键词，由博查API执行搜索，结果返回AI整合
+3. **无搜索**（`search: false` + `ENABLE_THIRD_SEARCH = False`）→ 纯文本对话
 
 ### 第三方搜索流程
 ```
@@ -196,6 +196,7 @@ THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key 
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
 THIRD_SEARCH_COUNT = 10                                      # 单次搜索返回条数 (1-50)
 MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数（AI可多次修正搜索词）
+ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关，仅当模型无原生搜索时生效
 
 # ===== 模型配置 =====
 MODELS_CONFIG = {
@@ -207,7 +208,6 @@ MODELS_CONFIG = {
         "model_id": "deepseek-v4-flash",  # 实际传入 API 的 model 参数
         "vision": False,             # 是否支持图片识别
         "search": False,             # 是否自带联网搜索
-        "third_search": False        # 无原生搜索时，是否启用博查API兜底
     },
     "A": { ... },                    # /A 大写 = 严肃模式；/a 小写 = 随性模式
     "B": { ... },                    # 同上。B/C 通常配置支持 vision+search 的模型
@@ -230,8 +230,8 @@ MODELS_CONFIG = {
 | `MAX_SEARCH_ROUNDS` | 最大搜索轮数。第一轮搜错AI可修正搜索词重新搜，累计搜索数 |
 | `MODELS_CONFIG.*.api_type` | `"openai"` 兼容绝大多数国产模型和中转站；`"gemini"` 用于 Google Gemini |
 | `MODELS_CONFIG.*.vision` | 开启后图片消息会转为 base64 传给模型 |
-| `MODELS_CONFIG.*.search` | 模型自带搜索 → 传原生搜索参数；不勾选 + `third_search:true` → 走博查兜底 |
-| `MODELS_CONFIG.*.third_search` | 仅 `search:false` 时生效，注册搜索工具让AI自行决定搜索词 |
+| `MODELS_CONFIG.*.search` | 模型自带搜索 → 传原生搜索参数；不勾选 + 开启 `ENABLE_THIRD_SEARCH` → 走博查兜底 |
+| `ENABLE_THIRD_SEARCH` | 第三方搜索总开关。仅模型 `search: false` 时生效，开启后注册搜索工具让AI自行决定搜索词。需同时填写 `THIRD_SEARCH_API_KEY` |
 
 等待nonebot和napcat通信成功后，at对应qq即可触发ai回复。  
 模型支持的情况下，引用回复图片+at对应qq，或直接图片+at对应qq，可触发图片识别。

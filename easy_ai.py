@@ -1007,6 +1007,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
     else:
         # 这里会过滤所有API格式设置错误的模型
         await send_and_save(bot, event, chat_handler, MessageSegment.at(event.user_id) + f"（模型：{model_config['name']}）API格式设置错误！", is_finish=True)
+        return
 
     # 发送请求并根据格式解析返回结果
     try:

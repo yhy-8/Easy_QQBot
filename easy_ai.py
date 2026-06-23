@@ -651,6 +651,30 @@ async def bocha_search(query: str, include: str = "", exclude: str = "") -> tupl
         return "", 0
 
 
+# ========== 辅助函数：批量执行 web_search 工具调用 ==========
+async def _execute_web_search(messages: list, tool_calls: list, fallback_query: str) -> int:
+    """执行搜索工具调用并将结果追加到 messages，返回搜索条数"""
+    count = 0
+    for tc in tool_calls:
+        if tc["function"]["name"] != "web_search":
+            continue
+        try:
+            args = json.loads(tc["function"]["arguments"])
+        except Exception:
+            args = {}
+        query = args.get("query", fallback_query)
+        include = args.get("include", "")
+        exclude = args.get("exclude", "")
+        search_text, sc = await bocha_search(query, include=include, exclude=exclude)
+        count += sc
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tc["id"],
+            "content": search_text if search_text else "搜索无结果"
+        })
+    return count
+
+
 # ========== 1. 机器人启动时自动拉取同步历史记录 ==========
 driver = get_driver()
 @driver.on_bot_connect
@@ -1033,24 +1057,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
                         # 初始响应如果带 tool_call → 执行搜索，否则直接取文本
                         if current_msg.get("tool_calls"):
                             messages.append({"role": "assistant", "content": None, "tool_calls": current_msg["tool_calls"]})
-                            for tc in current_msg["tool_calls"]:
-                                if tc["function"]["name"] != "web_search":
-                                    continue
-                                try:
-                                    tc_args = json.loads(tc["function"]["arguments"])
-                                except Exception:
-                                    tc_args = {}
-                                tc_query = tc_args.get("query", user_input)
-                                tc_include = tc_args.get("include", "")
-                                tc_exclude = tc_args.get("exclude", "")
-
-                                search_text, sc = await bocha_search(tc_query, include=tc_include, exclude=tc_exclude)
-                                total_search_count += sc
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tc["id"],
-                                    "content": search_text if search_text else "搜索无结果"
-                                })
+                            total_search_count += await _execute_web_search(messages, current_msg["tool_calls"], user_input)
 
                             # 多轮搜索循环：AI 可继续修正搜索词
                             for round_num in range(MAX_SEARCH_ROUNDS):
@@ -1063,19 +1070,9 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                 if not is_last:
                                     next_payload["tools"] = [web_search_tool]
 
-                                async with session.post(current_api_url, headers=headers, json=next_payload, timeout=THIRD_SEARCH_TIMEOUT) as next_resp:
+                                async with session.post(current_api_url, headers=headers, json=next_payload, timeout=AI_CHAT_TIMEOUT) as next_resp:
                                     if next_resp.status != 200:
-                                        messages.append({"role": "user", "content": "[系统提示：上一轮请求失败，请基于当前已有的搜索结果和你的知识直接回复用户]"})
-                                        fail_payload = {
-                                            "model": model_config.get("model_id", "deepseek-chat"),
-                                            "messages": messages,
-                                            "stream": False
-                                        }
-                                        async with session.post(current_api_url, headers=headers, json=fail_payload, timeout=THIRD_SEARCH_TIMEOUT) as fail_resp:
-                                            if fail_resp.status == 200:
-                                                fail_data = await fail_resp.json()
-                                                reply_text = fail_data["choices"][0]["message"]["content"] or ""
-                                        break
+                                        raise Exception(await next_resp.text())
 
                                     current_data = await next_resp.json()
                                     current_msg = current_data["choices"][0]["message"]
@@ -1083,32 +1080,12 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                     if current_msg.get("tool_calls") and not is_last:
                                         # AI 要求再次搜索 → 执行搜索，继续循环
                                         messages.append({"role": "assistant", "content": None, "tool_calls": current_msg["tool_calls"]})
-                                        for tc in current_msg["tool_calls"]:
-                                            if tc["function"]["name"] != "web_search":
-                                                continue
-                                            try:
-                                                tc_args = json.loads(tc["function"]["arguments"])
-                                            except Exception:
-                                                tc_args = {}
-                                            tc_query = tc_args.get("query", user_input)
-                                            tc_include = tc_args.get("include", "")
-                                            tc_exclude = tc_args.get("exclude", "")
-
-                                            search_text, sc = await bocha_search(tc_query, include=tc_include, exclude=tc_exclude)
-                                            total_search_count += sc
-                                            messages.append({
-                                                "role": "tool",
-                                                "tool_call_id": tc["id"],
-                                                "content": search_text if search_text else "搜索无结果"
-                                            })
-                                        continue
+                                        total_search_count += await _execute_web_search(messages, current_msg["tool_calls"], user_input)
                                     else:
-                                        reply_text = current_msg.get("content") or ""
-                                        reply_text = reply_text.strip()
+                                        reply_text = (current_msg.get("content") or "").strip()
                                         break
                         else:
-                            reply_text = current_msg.get("content")
-                            reply_text = reply_text.strip()
+                            reply_text = (current_msg.get("content") or "").strip()
 
                         search_count = total_search_count
                     else:

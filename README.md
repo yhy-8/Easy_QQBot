@@ -201,7 +201,7 @@ THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key 
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
 THIRD_SEARCH_COUNT = 25                                      # 单次搜索返回条数 (1-50)
 MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数（AI可多次修正搜索词）
-THIRD_SEARCH_TIMEOUT = 30                                   # 第三方搜索请求超时（秒），覆盖博查API调用及后续AI轮次
+THIRD_SEARCH_TIMEOUT = 30                                   # 第三方搜索请求超时（秒）
 ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关，仅当模型无原生搜索时生效
 
 # ===== 模型配置 =====

@@ -1075,7 +1075,8 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                 if not is_last:
                                     next_payload["tools"] = [web_search_tool]
                                 else:
-                                    next_payload["messages"] = [{"role": "system", "content": "[系统重要提示：搜索轮次已用完，请基于现有信息直接回答用户问题，不要要求继续搜索。]"}] + messages
+                                    modified_system = {"role": "system", "content": system_prompt + "\n[系统重要提示：搜索轮次已用完，请基于现有信息直接回答用户问题，不要要求继续搜索。]"}
+                                    next_payload["messages"] = [modified_system] + messages[1:]
 
                                 async with session.post(current_api_url, headers=headers, json=next_payload, timeout=AI_CHAT_TIMEOUT) as next_resp:
                                     if next_resp.status != 200:
@@ -1124,6 +1125,9 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                 # 如果没有搜索词，但有网页块数据，则统计有效网页块
                                 chunks = grounding_metadata.get("groundingChunks", [])
                                 search_count = len([c for c in chunks if "web" in c])
+
+        if not reply_text:
+            reply_text = "AI 未给出任何回复，请稍后重试。"
 
         prefix_hint = f"模型：{model_config['name']}，记录：{len(rows)}"
         if base64_images:

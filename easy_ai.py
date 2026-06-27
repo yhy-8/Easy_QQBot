@@ -652,7 +652,7 @@ async def bocha_search(query: str, include: str = "", exclude: str = "") -> tupl
 
 
 # ========== 辅助函数：批量执行 web_search 工具调用 ==========
-async def _execute_web_search(messages: list, tool_calls: list, fallback_query: str) -> int:
+async def _execute_web_search(messages: list, tool_calls: list) -> int:
     """执行搜索工具调用并将结果追加到 messages，返回搜索条数"""
     count = 0
     for tc in tool_calls:
@@ -661,8 +661,13 @@ async def _execute_web_search(messages: list, tool_calls: list, fallback_query: 
         try:
             args = json.loads(tc["function"]["arguments"])
         except Exception:
-            args = {}
-        query = args.get("query", fallback_query)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": "工具调用参数格式错误，请检查 JSON 格式后重试"
+            })
+            continue
+        query = args.get("query", "")
         include = args.get("include", "")
         exclude = args.get("exclude", "")
         search_text, sc = await bocha_search(query, include=include, exclude=exclude)
@@ -1062,7 +1067,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
                         # 初始响应如果带 tool_call → 执行搜索，否则直接取文本
                         if current_msg.get("tool_calls"):
                             messages.append({"role": "assistant", "content": None, "tool_calls": current_msg["tool_calls"]})
-                            total_search_count += await _execute_web_search(messages, current_msg["tool_calls"], user_input)
+                            total_search_count += await _execute_web_search(messages, current_msg["tool_calls"])
 
                             # 多轮搜索循环：AI 可继续修正搜索词
                             for round_num in range(MAX_SEARCH_ROUNDS):
@@ -1088,7 +1093,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                     if current_msg.get("tool_calls") and not is_last:
                                         # AI 要求再次搜索 → 执行搜索，继续循环
                                         messages.append({"role": "assistant", "content": None, "tool_calls": current_msg["tool_calls"]})
-                                        total_search_count += await _execute_web_search(messages, current_msg["tool_calls"], user_input)
+                                        total_search_count += await _execute_web_search(messages, current_msg["tool_calls"])
                                     else:
                                         reply_text = (current_msg.get("content") or "").strip()
                                         break

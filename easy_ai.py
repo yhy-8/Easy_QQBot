@@ -931,11 +931,10 @@ async def handle_ai_chat(bot: Bot, event: Event):
         bot_identity = f"{bot_group_name}（QQ昵称：{_bot_nickname}）"
     else:
         bot_identity = _bot_nickname
-    system_rules = MODE_PROMPTS[selected_mode].format(bot_identity=bot_identity)
+    system_prompt = MODE_PROMPTS[selected_mode].format(bot_identity=bot_identity)
 
     if history_text.strip():
         final_prompt = (
-            f"{system_rules}\n"
             f"--- 真实群聊历史记录 ---\n"
             f"{history_text}\n"
             f"------------------------\n\n"
@@ -944,14 +943,13 @@ async def handle_ai_chat(bot: Bot, event: Event):
         )
     else:
         final_prompt = (
-            f"{system_rules}\n"
             f"现在是 {current_time}，用户 {user_name} 正在向你提问：\n"
             f"{user_input}\n"
         )
 
     # 如果有图片，打上“当前附件”的强力思想钢印
     if is_vision_enabled and base64_images:
-        final_prompt += "\n[系统重要提示：用户本次提问附带了视觉图片。请结合你的视觉能力回答上述问题。请明确：这些图片是该用户当下的提问附件，绝不是历史聊天记录中的杂图！]"
+        system_prompt += "\n[系统重要提示：用户本次提问附带了视觉图片。请结合你的视觉能力回答上述问题。请明确：这些图片是该用户当下的提问附件，绝不是历史聊天记录中的杂图！]"
 
     # Payload 组装
 
@@ -976,6 +974,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
         payload = {
             "model": model_config.get("model_id", "deepseek-chat"),
             "messages": [
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message_content}
             ],
             "stream": False
@@ -1019,6 +1018,9 @@ async def handle_ai_chat(bot: Bot, event: Event):
                 })
 
         payload = {
+            "systemInstruction": {
+                "parts": [{"text": system_prompt}]
+            },
             "contents": [{
                 "role": "user",
                 "parts": parts
@@ -1049,7 +1051,10 @@ async def handle_ai_chat(bot: Bot, event: Event):
                 if api_type == "openai":
                     if use_third_search:
                         # 第三方搜索：先处理初始 tool_call，再进入多轮循环
-                        messages = [{"role": "user", "content": user_message_content}]
+                        messages = [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_message_content}
+                        ]
                         total_search_count = 0
                         reply_text = ""
                         current_msg = data["choices"][0]["message"]
@@ -1069,6 +1074,8 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                 }
                                 if not is_last:
                                     next_payload["tools"] = [web_search_tool]
+                                else:
+                                    next_payload["messages"] = [{"role": "system", "content": "[系统重要提示：搜索轮次已用完，请基于现有信息直接回答用户问题，不要要求继续搜索。]"}] + messages
 
                                 async with session.post(current_api_url, headers=headers, json=next_payload, timeout=AI_CHAT_TIMEOUT) as next_resp:
                                     if next_resp.status != 200:

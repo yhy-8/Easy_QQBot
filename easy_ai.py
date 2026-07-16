@@ -110,6 +110,42 @@ MODE_PROMPTS = {
 _bot_nickname = "AI助手"
 
 
+# ========== 辅助函数：安全解析 API 回复 ==========
+def _get_openai_message(data: dict) -> dict:
+    """获取 OpenAI 兼容回包中的第一条 message，缺失时返回空字典"""
+    if not isinstance(data, dict):
+        return {}
+    choices = data.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return {}
+    message = choices[0].get("message") or {}
+    return message if isinstance(message, dict) else {}
+
+
+def _extract_api_reply_text(data: dict, api_type: str) -> str:
+    """从 OpenAI / Gemini 回包中提取正文；缺少正文时返回空字符串"""
+    if not isinstance(data, dict):
+        return ""
+
+    if api_type == "openai":
+        content = _get_openai_message(data).get("content")
+        return content.strip() if isinstance(content, str) else ""
+
+    if api_type == "gemini":
+        candidates = data.get("candidates") or []
+        if not candidates or not isinstance(candidates[0], dict):
+            return ""
+        content = candidates[0].get("content") or {}
+        parts = content.get("parts") or [] if isinstance(content, dict) else []
+        for part in reversed(parts):
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                text = part["text"].strip()
+                if text:
+                    return text
+
+    return ""
+
+
 # ========== 数据库初始化 ==========
 driver = get_driver()
 @driver.on_startup
@@ -264,10 +300,7 @@ async def get_dynamic_history_length(group_id: int) -> int:
                     data = await resp.json()
 
                     # 按照对应格式解析回包
-                    if api_type == "openai":
-                        reply = data["choices"][0]["message"]["content"].strip()
-                    else:
-                        reply = data["candidates"][0]["content"]["parts"][-1]["text"].strip()
+                    reply = _extract_api_reply_text(data, api_type)
 
                     match = re.search(r'\d+', reply)
                     if match:
@@ -1062,7 +1095,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
                         ]
                         total_search_count = 0
                         reply_text = ""
-                        current_msg = data["choices"][0]["message"]
+                        current_msg = _get_openai_message(data)
 
                         # 初始响应如果带 tool_call → 执行搜索，否则直接取文本
                         if current_msg.get("tool_calls"):
@@ -1088,7 +1121,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                         raise Exception(await next_resp.text())
 
                                     current_data = await next_resp.json()
-                                    current_msg = current_data["choices"][0]["message"]
+                                    current_msg = _get_openai_message(current_data)
 
                                     if current_msg.get("tool_calls") and not is_last:
                                         # AI 要求再次搜索 → 执行搜索，继续循环
@@ -1103,9 +1136,9 @@ async def handle_ai_chat(bot: Bot, event: Event):
                         search_count = total_search_count
                     else:
                         # 原生 / 无搜索：标准解析
-                        reply_text = data["choices"][0]["message"]["content"].strip()
+                        reply_text = _extract_api_reply_text(data, api_type)
                         if is_search_enabled:
-                            tool_calls = data.get("choices", [{}])[0].get("message", {}).get("tool_calls", [])
+                            tool_calls = _get_openai_message(data).get("tool_calls", [])
                             if tool_calls:
                                 search_count = len(tool_calls)
                             else:
@@ -1115,10 +1148,11 @@ async def handle_ai_chat(bot: Bot, event: Event):
 
                 elif api_type == "gemini":
                     # Gemini 格式解析
-                    # 取数组的最后一个元素 parts[-1]。如果有parts[1]，parts[0]便是思考过程；反之没有parts[1]，parts[0]便是正文
-                    reply_text = data["candidates"][0]["content"]["parts"][-1]["text"].strip()
+                    # 从末尾取最后个有效文本 part，并兼容审查阻断时 candidates/parts 为空
+                    reply_text = _extract_api_reply_text(data, api_type)
                     if is_search_enabled:
-                        candidate = data.get("candidates", [{}])[0]
+                        candidates = data.get("candidates") or []
+                        candidate = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
                         grounding_metadata = candidate.get("groundingMetadata", {})
 
                         if grounding_metadata:
@@ -1132,7 +1166,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                 search_count = len([c for c in chunks if "web" in c])
 
         if not reply_text:
-            reply_text = "AI 未给出任何回复，请稍后重试。"
+            reply_text = "（模型API拒绝回复）"
 
         prefix_hint = f"模型：{model_config['name']}，记录：{len(rows)}"
         if base64_images:

@@ -137,6 +137,8 @@ def _extract_api_reply_text(data: dict, api_type: str) -> str:
             return ""
         content = candidates[0].get("content") or {}
         parts = content.get("parts") or [] if isinstance(content, dict) else []
+        if not isinstance(parts, list):
+            return ""
         for part in reversed(parts):
             if isinstance(part, dict) and isinstance(part.get("text"), str):
                 text = part["text"].strip()
@@ -621,10 +623,10 @@ async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tu
 
 
 # ========== 辅助函数：第三方搜索（博查AI） ==========
-async def bocha_search(query: str, include: str = "", exclude: str = "") -> tuple[str, int]:
-    """调用博查AI搜索API，返回 (格式化搜索文本, 结果数量)"""
+async def bocha_search(query: str, include: str = "", exclude: str = "") -> tuple[str, int, bool]:
+    """调用博查AI搜索API，返回 (格式化搜索文本, 结果数量, 是否成功)"""
     if not THIRD_SEARCH_API_KEY or not query:
-        return "", 0
+        return "", 0, False
 
     headers = {
         "Content-Type": "application/json",
@@ -645,16 +647,16 @@ async def bocha_search(query: str, include: str = "", exclude: str = "") -> tupl
         async with aiohttp.ClientSession() as session:
             async with session.post(THIRD_SEARCH_API_URL, headers=headers, json=body, timeout=THIRD_SEARCH_TIMEOUT) as resp:
                 if resp.status != 200:
-                    return "", 0
+                    return "", 0, False
 
                 data = await resp.json()
                 if data.get("code") != 200:
-                    return "", 0
+                    return "", 0, False
 
                 web_pages = data.get("data", {}).get("webPages", {})
                 results = web_pages.get("value", [])
                 if not results:
-                    return "", 0
+                    return "", 0, True
 
                 lines = ["[网络搜索结果]"]
                 for i, item in enumerate(results, 1):
@@ -676,23 +678,26 @@ async def bocha_search(query: str, include: str = "", exclude: str = "") -> tupl
                         lines.append(f"   全文概要：{summary}")
 
                 search_text = "\n".join(lines)
-                return search_text, len(results)
+                return search_text, len(results), True
 
     except asyncio.TimeoutError:
-        return "", 0
-    except Exception as e:
-        return "", 0
+        return "", 0, False
+    except Exception:
+        return "", 0, False
 
 
 # ========== 辅助函数：批量执行 web_search 工具调用 ==========
-async def _execute_web_search(messages: list, tool_calls: list) -> int:
-    """执行搜索工具调用并将结果追加到 messages，返回搜索条数"""
+async def _execute_web_search(messages: list, tool_calls: list) -> tuple[int, bool]:
+    """执行搜索工具调用并将结果追加到 messages，返回 (搜索条数, 是否失败)"""
     count = 0
+    failed = False
     for tc in tool_calls:
         if tc["function"]["name"] != "web_search":
             continue
         try:
             args = json.loads(tc["function"]["arguments"])
+            if not isinstance(args, dict):
+                raise ValueError("工具调用参数必须是 JSON 对象")
         except Exception:
             messages.append({
                 "role": "tool",
@@ -703,14 +708,23 @@ async def _execute_web_search(messages: list, tool_calls: list) -> int:
         query = args.get("query", "")
         include = args.get("include", "")
         exclude = args.get("exclude", "")
-        search_text, sc = await bocha_search(query, include=include, exclude=exclude)
+        if (not isinstance(query, str) or not query.strip()
+                or not isinstance(include, str) or not isinstance(exclude, str)):
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": "工具调用参数格式错误，请检查参数类型和搜索词后重试"
+            })
+            continue
+        search_text, sc, search_ok = await bocha_search(query, include=include, exclude=exclude)
         count += sc
+        failed = failed or not search_ok
         messages.append({
             "role": "tool",
             "tool_call_id": tc["id"],
-            "content": search_text if search_text else "搜索无结果"
+            "content": search_text if search_text else ("搜索无结果" if search_ok else "搜索失败")
         })
-    return count
+    return count, failed
 
 
 # ========== 1. 机器人启动时自动拉取同步历史记录 ==========
@@ -1094,13 +1108,16 @@ async def handle_ai_chat(bot: Bot, event: Event):
                             {"role": "user", "content": user_message_content}
                         ]
                         total_search_count = 0
+                        third_search_failed = False
                         reply_text = ""
                         current_msg = _get_openai_message(data)
 
                         # 初始响应如果带 tool_call → 执行搜索，否则直接取文本
                         if current_msg.get("tool_calls"):
                             messages.append({"role": "assistant", "content": None, "tool_calls": current_msg["tool_calls"]})
-                            total_search_count += await _execute_web_search(messages, current_msg["tool_calls"])
+                            batch_count, batch_failed = await _execute_web_search(messages, current_msg["tool_calls"])
+                            total_search_count += batch_count
+                            third_search_failed = third_search_failed or batch_failed
 
                             # 多轮搜索循环：AI 可继续修正搜索词
                             for round_num in range(MAX_SEARCH_ROUNDS):
@@ -1126,14 +1143,16 @@ async def handle_ai_chat(bot: Bot, event: Event):
                                     if current_msg.get("tool_calls") and not is_last:
                                         # AI 要求再次搜索 → 执行搜索，继续循环
                                         messages.append({"role": "assistant", "content": None, "tool_calls": current_msg["tool_calls"]})
-                                        total_search_count += await _execute_web_search(messages, current_msg["tool_calls"])
+                                        batch_count, batch_failed = await _execute_web_search(messages, current_msg["tool_calls"])
+                                        total_search_count += batch_count
+                                        third_search_failed = third_search_failed or batch_failed
                                     else:
                                         reply_text = (current_msg.get("content") or "").strip()
                                         break
                         else:
                             reply_text = (current_msg.get("content") or "").strip()
 
-                        search_count = total_search_count
+                        search_count = False if third_search_failed else total_search_count
                     else:
                         # 原生 / 无搜索：标准解析
                         reply_text = _extract_api_reply_text(data, api_type)
@@ -1171,7 +1190,9 @@ async def handle_ai_chat(bot: Bot, event: Event):
         prefix_hint = f"模型：{model_config['name']}，记录：{len(rows)}"
         if base64_images:
             prefix_hint += f"，图片：{len(base64_images)}"
-        if search_count > 0:
+        if search_count is False:
+            prefix_hint += "，搜索：False"
+        elif search_count > 0:
             prefix_hint += f"，搜索：{search_count}"
         prefix_hint += "\n"
         msg = MessageSegment.at(event.user_id) + "\n" + MessageSegment.text(f"{prefix_hint}{reply_text}")

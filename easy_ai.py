@@ -389,12 +389,27 @@ async def parse_message_content(bot: Bot, group_id: int, raw_message) -> str:
 
 # ========== 辅助函数：统一发送并存入数据库 ==========
 async def send_and_save(bot: Bot, event: GroupMessageEvent, matcher, msg, is_finish: bool = False):
-    content_to_save = await parse_message_content(bot, event.group_id, msg)
-
+    send_result = None
     try:
         send_result = await matcher.send(msg)
+    except Exception as e:
+        print(f"[AI Chat] 消息首次发送失败: {type(e).__name__}: {e}")
+        if is_finish:
+            # 正式回复发送失败时最多再重试 3 次；通道永久失效时只记录日志。
+            for retry_num in range(1, 4):
+                await asyncio.sleep(1)
+                try:
+                    send_result = await matcher.send(msg)
+                    break
+                except Exception as retry_error:
+                    print(
+                        f"[AI Chat] 正式回复第 {retry_num}/3 次重试失败: "
+                        f"{type(retry_error).__name__}: {retry_error}"
+                    )
 
-        if isinstance(send_result, dict) and "message_id" in send_result:
+    if isinstance(send_result, dict) and "message_id" in send_result:
+        try:
+            content_to_save = await parse_message_content(bot, event.group_id, msg)
             bot_msg_id = send_result["message_id"]
             bot_timestamp = int(datetime.datetime.now().timestamp())
 
@@ -411,8 +426,8 @@ async def send_and_save(bot: Bot, event: GroupMessageEvent, matcher, msg, is_fin
                 bot_user_id = str(bot.self_id)
 
             await insert_message_to_db(bot_msg_id, event.group_id, bot_timestamp, bot_user_id, bot_qq_name, bot_group_name, content_to_save)
-    except Exception as e:
-        print(f"[AI Chat] 消息发送或存库失败: {e}")
+        except Exception as e:
+            print(f"[AI Chat] 消息存库失败: {e}")
 
     if is_finish:
         await matcher.finish()

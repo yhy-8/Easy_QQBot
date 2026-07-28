@@ -690,7 +690,8 @@ class OneBotMessageParser:
         if seg_type == "at":
             qq_id = str(seg_data.get("qq", ""))
             return "[@全体成员]" if qq_id == "all" else f"[@{qq_id}]"
-        return f"[{seg_type}]"
+        else:
+            return f"[{seg_type}]"
 
     async def _render_quoted_ai_segment(
             self,
@@ -711,7 +712,13 @@ class OneBotMessageParser:
             summary = seg_data.get("summary", "").strip()
             return summary if summary else "[表情包]"
         if seg_type == "file":
-            return f"[文件：{seg_data.get('name', '未知')}]"
+            file_name = (
+                seg_data.get("name")
+                or seg_data.get("file")
+                or seg_data.get("id")
+                or "未知文件"
+            )
+            return f"[文件：{file_name}]"
         if seg_type == "record":
             return "[语音]"
         if seg_type == "video":
@@ -720,13 +727,17 @@ class OneBotMessageParser:
             return "[聊天记录]"
         if seg_type == "node":
             return "[合并转发节点]"
+        if seg_type == "reply":
+            return "[引用回复（未继续展开）]"
         if seg_type == "at":
             return await self._format_member_at(str(seg_data.get("qq", "")))
         if seg_type in ["json", "xml"]:
             return "[分享了卡片/链接]"
-        return f"[{seg_type}]"
+        else:
+            return f"[{seg_type}]"
 
     async def _render_ai_reply(self, seg_data: dict, image_ids: list[str]) -> str:
+        """只展开当前引用一层，引用内容中的 reply 不再请求和递归解析。"""
         try:
             reply_msg = await self.bot.get_msg(message_id=seg_data.get("id"))
             reply_time = datetime.datetime.fromtimestamp(
@@ -799,7 +810,8 @@ class OneBotMessageParser:
             return "[合并转发节点]"
         if seg_type in ["json", "xml"]:
             return "[分享了卡片/链接]"
-        return f"[{seg_type}]"
+        else:
+            return f"[{seg_type}]"
 
     async def parse(self, raw_message, *, for_ai: bool = False) -> ParsedMessage:
         if isinstance(raw_message, str):

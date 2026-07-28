@@ -109,53 +109,6 @@
 
 ---
 
-## 搜索机制说明
-
-### 搜索方式优先级
-1. **模型原生搜索**（`search: true`）→ 模型自带联网能力，按 Grok、GLM、Moonshot、Gemini 等模型的接口格式启用内置搜索
-2. **第三方搜索**（`search: false` + 全局 `ENABLE_THIRD_SEARCH = True`）→ 注册搜索工具给AI，AI自主决定搜索关键词，由博查API执行搜索，结果返回AI整合
-3. **无搜索**（`search: false` + `ENABLE_THIRD_SEARCH = False`）→ 纯文本对话
-
-### 单文件内部结构
-
-项目仍以一个 `easy_ai.py` 文件部署，但内部按职责分层：
-
-- `OneBotMessageParser`：统一生成数据库存储文本和 AI 富文本
-- `ChatService`：准备图片、历史记录、提示词、模型请求并解析回复
-- `SearchResult` / `ModelReply`：统一表达搜索状态和模型正文
-- `_run_openai_third_search_workflow`：独立处理博查工具调用和多轮搜索
-- NoneBot Handler：只负责事件校验、快速提示和最终发送
-
-完整兼容性要求与重构核查结果见 `REFACTOR_CHECKLIST.md`。
-
-### 第三方搜索流程
-```
-用户提问 "查找科技新闻（只看官媒）"
-    │
-    ├─ 第 1 轮 ─→ AI收到问题 + 搜索工具
-    │      AI决定搜索词："2026年6月科技新闻"
-    │      AI决定 include："xinhuanet.com|people.com.cn"（限定官媒）
-    │      博查返回 8 条结果
-    │
-    ├─ 第 2 轮 ─→ AI看到搜索结果，发现不够精确
-    │      AI修正搜索词："2026年6月 AI芯片 科技新闻"
-    │      AI决定 exclude："zhihu.com"（排除问答站点）
-    │      博查返回 5 条结果
-    │
-    └─ 第 3 轮 ─→ AI收到两轮累计 13 条结果
-           整合信息，给出最终回复（显示 搜索：13）
-```
-
-关键点：
-- **AI 自己决定搜什么关键词**，不是机械地用用户原话搜索
-- **AI 可以多轮修正搜索词**，第一轮搜偏了还有补救机会（受 `MAX_SEARCH_ROUNDS` 限制）
-- **AI 可控制搜索范围**：支持传入 `include`（限定网站）和 `exclude`（排除网站），由 AI 根据场景自主决定
-- **`summary` 由程序硬编码开启**，始终返回网页文本摘要，AI 无需关心
-- **`count` 由配置项 `THIRD_SEARCH_COUNT` 固定**，AI 不可调整，防止超量
-- **搜索数累计**：回复中 "搜索：n" 是所有轮次的搜索结果总数
-
----
-
 ## 搭建说明
 
 ### napcat安装及配置

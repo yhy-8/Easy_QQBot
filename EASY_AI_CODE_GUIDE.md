@@ -582,7 +582,6 @@ data.choices[0].message
 
 | `model_id` 特征 | 请求参数 | 适配器 |
 |---|---|---|
-| 包含 `grok` | `tools=[{"type":"web_search"}]` | `grok_web_search` |
 | 包含 `glm` | 带 `enable=True` 的 `web_search` 工具 | `glm_web_search` |
 | 包含 `moonshot` | `$web_search` 内置函数 | `moonshot_web_search` |
 | 其他 | `web_search=True, network=True` | `generic_search` |
@@ -597,15 +596,7 @@ data.choices[0].message
 2. `server_side_tool_usage` 中键名包含 `SEARCH` 的整数合计。
 3. `num_server_side_tools_used`。
 4. `num_sources_used`。
-5. `citations` 列表长度。
-6. `sources` 列表长度。
-7. Grok 正文中的 `<xai-search ...>` 起始标签数量。
-
-Grok 适配器还会：
-
-- 统计 `<xai-search>` 轨迹。
-- 从最终正文删除开始/结束标签。
-- 把三行以上空行压缩为两行。
+5. `citations` 或 `sources` 列表长度。
 
 如果搜索已启用，但中转没有返回任何可核实字段，则构造：
 
@@ -911,7 +902,7 @@ requested=True, performed=None, count=None
 | `_get_openai_message` | 函数 | 安全读取 OpenAI 第一条 message |
 | `_extract_api_reply_text` | 函数 | 统一提取 OpenAI/Gemini 正文 |
 | `_enable_openai_native_search` | 函数 | 按模型特征组装原生搜索请求 |
-| `_parse_openai_native_search_response` | 函数 | 统一解析搜索证据并清理 Grok 标签 |
+| `_parse_openai_native_search_response` | 函数 | 统一解析 OpenAI 兼容回包中的搜索证据 |
 | `init_http_session` | 启动钩子 | 创建共享 HTTP 会话 |
 | `close_http_session` | 关闭钩子 | 关闭共享 HTTP 会话 |
 | `get_http_session` | 函数 | 返回或惰性创建共享会话 |

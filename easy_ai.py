@@ -262,12 +262,6 @@ def _enable_openai_native_search(payload: dict, model_config: dict) -> str:
     """
     model_id_lower = str(model_config.get("model_id", "")).lower()
 
-    # Grok/xAI 的服务端搜索工具。部分官逆中转只识别该 tools 结构，
-    # 会忽略 web_search=True / network=True 之类的非标准字段。
-    if "grok" in model_id_lower:
-        payload["tools"] = [{"type": "web_search"}]
-        return "grok_web_search"
-
     # 智谱清言 (GLM-4) 的原生联网参数
     if "glm" in model_id_lower:
         payload["tools"] = [{"type": "web_search", "web_search": {"enable": True}}]
@@ -299,26 +293,14 @@ def _parse_openai_native_search_response(
         return ModelReply(text=reply_text)
 
     reply_text = reply_text if isinstance(reply_text, str) else ""
-    trace_count = 0
-
-    # 部分 Grok 官逆中转把搜索轨迹混入正文，而不返回结构化统计。
-    if search_adapter == "grok_web_search":
-        trace_count = len(re.findall(r"<xai-search\b[^>]*>", reply_text, flags=re.IGNORECASE))
-        reply_text = re.sub(
-            r"</?xai-search\b[^>]*>",
-            "",
-            reply_text,
-            flags=re.IGNORECASE
-        )
-        reply_text = re.sub(r"\n{3,}", "\n\n", reply_text).strip()
 
     if not isinstance(data, dict):
         return ModelReply(
             text=reply_text,
             search=SearchResult(
                 requested=True,
-                performed=True if trace_count > 0 else None,
-                count=trace_count if trace_count > 0 else None
+                performed=None,
+                count=None
             )
         )
 
@@ -366,8 +348,8 @@ def _parse_openai_native_search_response(
         text=reply_text,
         search=SearchResult(
             requested=True,
-            performed=True if trace_count > 0 else None,
-            count=trace_count if trace_count > 0 else None
+            performed=None,
+            count=None
         )
     )
 

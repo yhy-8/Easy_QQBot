@@ -132,10 +132,8 @@ class SearchResult:
     def prefix_value(self) -> str | None:
         if self.failed:
             return "False"
-        if isinstance(self.count, int) and self.count > 0:
+        if type(self.count) is int and self.count > 0:
             return str(self.count)
-        if self.requested and self.performed is None:
-            return "True"
         return None
 
 
@@ -340,7 +338,7 @@ def _parse_openai_native_search_response(
         if isinstance(server_usage, dict):
             count = sum(
                 value for key, value in server_usage.items()
-                if isinstance(value, int) and "SEARCH" in str(key).upper()
+                if type(value) is int and "SEARCH" in str(key).upper()
             )
             if count > 0:
                 return ModelReply(
@@ -350,7 +348,7 @@ def _parse_openai_native_search_response(
 
         for key in ("num_server_side_tools_used", "num_sources_used"):
             value = container.get(key)
-            if isinstance(value, int) and value > 0:
+            if type(value) is int and value > 0:
                 return ModelReply(
                     text=reply_text,
                     search=SearchResult(requested=True, performed=True, count=value)

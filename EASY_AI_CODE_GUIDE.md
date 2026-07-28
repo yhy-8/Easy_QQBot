@@ -170,10 +170,9 @@ OneBot 消息解析结果：
 
 1. `failed=True` → `搜索：False`。
 2. `count > 0` → `搜索：具体数字`。
-3. 已请求搜索但无法核实是否发生，即 `requested=True, performed=None` → `搜索：True`。
-4. 其他情况不显示搜索字段。
+3. 其他情况不显示搜索字段，包括已请求搜索但无法核实是否发生的 `requested=True, performed=None`。
 
-因此，“已开启搜索”不等于一定显示 `搜索：0`；程序只显示有意义的数字、`True` 或失败状态。
+因此，“已开启搜索”不等于真的发生了搜索；程序只显示可核实的正数或第三方搜索失败状态。
 
 ### 4.3 `ModelReply`
 
@@ -614,7 +613,7 @@ Grok 适配器还会：
 requested=True, performed=None, count=None
 ```
 
-最终回复头显示 `搜索：True`。
+最终回复头不显示搜索字段。
 
 ### 11.3 Gemini 原生搜索
 
@@ -824,7 +823,7 @@ requested=True, performed=None, count=None
 按需追加：
 
 - 至少一张图片成功发送给模型 → `，图片：n`。
-- `SearchResult.prefix_value()` 有值 → `，搜索：n/True/False`。
+- `SearchResult.prefix_value()` 有值 → `，搜索：n/False`。
 
 最后追加换行，模型正文紧随其后。
 
@@ -1021,7 +1020,7 @@ logger.error(f"失败: {e}")
 8. 模型空正文转换为明确占位。
 9. 正式 QQ 回复发送失败最多重试三次。
 10. `FinishedException` 必须重新抛出，维持 NoneBot 的流程控制。
-11. 模型原生搜索无统计字段时可显示 `搜索：True`。
+11. 模型原生搜索无可核实统计字段时不显示搜索字段。
 12. 第三方搜索最后一轮强制回答，避免模型一直要求继续搜索。
 
 ## 20. 扩展代码时应改哪里

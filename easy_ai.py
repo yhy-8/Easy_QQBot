@@ -127,13 +127,12 @@ class SearchResult:
     requested: bool = False
     performed: bool | None = False
     count: int | None = None
-    failed: bool = False
 
     def prefix_value(self) -> str | None:
-        if self.failed:
-            return "False"
         if type(self.count) is int and self.count > 0:
             return str(self.count)
+        if self.performed is True and type(self.count) is int and self.count == 0:
+            return "False"
         return None
 
 
@@ -1060,10 +1059,9 @@ async def bocha_search(query: str, include: str = "", exclude: str = "") -> tupl
 
 
 # ========== 辅助函数：批量执行 web_search 工具调用 ==========
-async def _execute_web_search(messages: list, tool_calls: list) -> tuple[int, bool]:
-    """执行搜索工具调用并将结果追加到 messages，返回 (搜索条数, 是否失败)"""
+async def _execute_web_search(messages: list, tool_calls: list) -> int:
+    """执行搜索工具调用并将结果追加到 messages，返回本批搜索条数。"""
     count = 0
-    failed = False
     for tc in tool_calls:
         if tc["function"]["name"] != "web_search":
             continue
@@ -1091,13 +1089,12 @@ async def _execute_web_search(messages: list, tool_calls: list) -> tuple[int, bo
             continue
         search_text, sc, search_ok = await bocha_search(query, include=include, exclude=exclude)
         count += sc
-        failed = failed or not search_ok
         messages.append({
             "role": "tool",
             "tool_call_id": tc["id"],
             "content": search_text if search_text else ("搜索无结果" if search_ok else "搜索失败")
         })
-    return count, failed
+    return count
 
 
 # ========== 辅助函数：OpenAI 第三方搜索工作流 ==========
@@ -1129,11 +1126,9 @@ async def _run_openai_third_search_workflow(
         )
 
     total_search_count = 0
-    third_search_failed = False
     messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
-    batch_count, batch_failed = await _execute_web_search(messages, tool_calls)
+    batch_count = await _execute_web_search(messages, tool_calls)
     total_search_count += batch_count
-    third_search_failed = third_search_failed or batch_failed
 
     reply_text = ""
     for round_num in range(MAX_SEARCH_ROUNDS):
@@ -1171,9 +1166,8 @@ async def _run_openai_third_search_workflow(
         tool_calls = current_msg.get("tool_calls")
         if tool_calls and not is_last:
             messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
-            batch_count, batch_failed = await _execute_web_search(messages, tool_calls)
+            batch_count = await _execute_web_search(messages, tool_calls)
             total_search_count += batch_count
-            third_search_failed = third_search_failed or batch_failed
         else:
             reply_text = (current_msg.get("content") or "").strip()
             break
@@ -1183,8 +1177,7 @@ async def _run_openai_third_search_workflow(
         search=SearchResult(
             requested=True,
             performed=True,
-            count=total_search_count,
-            failed=third_search_failed
+            count=total_search_count
         )
     )
 

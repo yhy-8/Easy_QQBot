@@ -61,6 +61,10 @@
 2. 苹果宣布将在秋季推出...
 ```
 
+第三方搜索工具允许模型按问题选择不限时间、一天内、一周内、一月内、一年内、
+指定日期或指定日期范围的结果；模型未指定时默认不限时间。单次请求数量始终限制在
+博查支持的 1–50 条范围内。
+
 ### 引用回复 — 针对某条消息追问
 ```
 群聊：
@@ -165,7 +169,7 @@ DEFAULT_MODE = "casual"            # 无前缀默认模式："serious"(严肃) �
 # ===== 第三方搜索（博查AI）=====
 THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key (https://open.bocha.cn)
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
-THIRD_SEARCH_COUNT = 25                                      # 单次搜索返回条数 (1-50)
+THIRD_SEARCH_COUNT = 25                                      # 单次搜索返回条数（运行时限制在 1-50）
 MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数；小于等于0时不提供第三方搜索工具
 THIRD_SEARCH_TIMEOUT = 30                                   # 第三方搜索请求超时（秒）
 ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关，仅当模型无原生搜索时生效
@@ -200,7 +204,7 @@ MODELS_CONFIG = {
 | `IMAGE_BASE_DIR` | 图片路径：同机留空；跨Docker填容器内挂载的绝对路径 |
 | `DEFAULT_MODE` | 无 /A /a 前缀时的默认模式 |
 | `THIRD_SEARCH_API_KEY` | 博查AI密钥，留空则不启用第三方搜索 |
-| `THIRD_SEARCH_COUNT` | 单次搜索返回给AI的结果条数 |
+| `THIRD_SEARCH_COUNT` | 单次搜索返回给AI的结果条数；超出范围时自动限制在 1–50，非整数时按 10 请求 |
 | `MAX_SEARCH_ROUNDS` | 最大搜索轮数。AI 每轮可自行决定发起一次或多次搜索，轮次用尽后强制文本回复；小于等于 0 时不提供第三方搜索工具 |
 | `MODELS_CONFIG.*.api_type` | `"openai"` 兼容绝大多数国产模型和中转站；`"gemini"` 用于 Google Gemini |
 | `MODELS_CONFIG.*.vision` | 开启后图片消息会转为 base64 传给模型 |

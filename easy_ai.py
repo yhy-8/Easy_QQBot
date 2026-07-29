@@ -35,7 +35,7 @@ DEFAULT_MODE = "casual"  # 无前缀时默认模式: "serious"(严肃) 或 "casu
 # ===== 第三方搜索配置 =====
 THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
-THIRD_SEARCH_COUNT = 25                                      # 单次搜索返回条数 (1-50)
+THIRD_SEARCH_COUNT = 25                                      # 单次搜索返回条数（运行时限制在 1-50）
 THIRD_SEARCH_TIMEOUT = 30                                    # 第三方搜索请求超时时间（秒）
 MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数；小于等于0时不提供第三方搜索工具
 ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关 (True/False)，仅当模型无原生搜索时生效
@@ -954,6 +954,44 @@ async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tu
 
 
 # ========== 第三方搜索工具定义 ==========
+THIRD_SEARCH_FRESHNESS_VALUES = (
+    "noLimit",
+    "oneDay",
+    "oneWeek",
+    "oneMonth",
+    "oneYear"
+)
+
+
+def _is_valid_search_freshness(value: object) -> bool:
+    """校验博查 freshness 预设值、单日或日期范围。"""
+    if not isinstance(value, str):
+        return False
+    if value in THIRD_SEARCH_FRESHNESS_VALUES:
+        return True
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        try:
+            datetime.date.fromisoformat(value)
+            return True
+        except ValueError:
+            return False
+
+    if re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}\.\.\d{4}-\d{2}-\d{2}",
+            value
+    ):
+        start_text, end_text = value.split("..", 1)
+        try:
+            start_date = datetime.date.fromisoformat(start_text)
+            end_date = datetime.date.fromisoformat(end_text)
+            return start_date <= end_date
+        except ValueError:
+            return False
+
+    return False
+
+
 THIRD_SEARCH_TOOL = {
     "type": "function",
     "function": {
@@ -963,6 +1001,15 @@ THIRD_SEARCH_TOOL = {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "搜索关键词"},
+                "freshness": {
+                    "type": "string",
+                    "description": (
+                        "搜索时间范围：noLimit=不限，oneDay=一天内，"
+                        "oneWeek=一周内，oneMonth=一月内，oneYear=一年内；"
+                        "也可使用 YYYY-MM-DD 指定一天，或用 "
+                        "YYYY-MM-DD..YYYY-MM-DD 指定日期范围；默认 noLimit"
+                    )
+                },
                 "include": {
                     "type": "string",
                     "description": "限定搜索的网站范围，多个域名用|或,分隔（如 qq.com|163.com）"
@@ -979,10 +1026,32 @@ THIRD_SEARCH_TOOL = {
 
 
 # ========== 辅助函数：第三方搜索（博查AI） ==========
-async def bocha_search(query: str, include: str = "", exclude: str = "") -> tuple[str, int, bool]:
+async def bocha_search(
+        query: str,
+        include: str = "",
+        exclude: str = "",
+        freshness: str = "noLimit"
+) -> tuple[str, int, bool]:
     """调用博查AI搜索API，返回 (格式化搜索文本, 结果数量, 是否成功)"""
     if not THIRD_SEARCH_API_KEY or not query:
         return "", 0, False
+    if not _is_valid_search_freshness(freshness):
+        logger.warning(f"[AI Chat] 博查搜索时间范围无效: {freshness!r}")
+        return "", 0, False
+
+    if type(THIRD_SEARCH_COUNT) is int:
+        request_count = min(max(THIRD_SEARCH_COUNT, 1), 50)
+        if request_count != THIRD_SEARCH_COUNT:
+            logger.warning(
+                f"[AI Chat] THIRD_SEARCH_COUNT={THIRD_SEARCH_COUNT} 超出 1-50，"
+                f"本次按 {request_count} 请求"
+            )
+    else:
+        request_count = 10
+        logger.warning(
+            f"[AI Chat] THIRD_SEARCH_COUNT={THIRD_SEARCH_COUNT!r} 不是整数，"
+            "本次按 10 请求"
+        )
 
     headers = {
         "Content-Type": "application/json",
@@ -990,9 +1059,9 @@ async def bocha_search(query: str, include: str = "", exclude: str = "") -> tupl
     }
     body = {
         "query": query,
-        "freshness": "noLimit",
+        "freshness": freshness,
         "summary": True,
-        "count": THIRD_SEARCH_COUNT
+        "count": request_count
     }
     if include:
         body["include"] = include
@@ -1008,30 +1077,57 @@ async def bocha_search(query: str, include: str = "", exclude: str = "") -> tupl
                 timeout=THIRD_SEARCH_TIMEOUT
         ) as resp:
             if resp.status != 200:
+                error_body = await resp.text()
                 logger.warning(
-                    f"[AI Chat] 博查搜索请求失败，状态码: {resp.status}"
+                    f"[AI Chat] 博查搜索请求失败，状态码: {resp.status}，"
+                    f"响应: {error_body}"
                 )
                 return "", 0, False
 
-            data = await resp.json()
-            if not isinstance(data, dict) or data.get("code") != 200:
+            try:
+                data = await resp.json()
+            except Exception as e:
+                error_body = await resp.text()
+                logger.exception(
+                    f"[AI Chat] 博查搜索响应不是有效 JSON: {e}，"
+                    f"响应: {error_body}"
+                )
+                return "", 0, False
+
+            response_code = data.get("code") if isinstance(data, dict) else None
+            response_message = None
+            log_id = None
+            if isinstance(data, dict):
+                response_message = data.get("msg") or data.get("message")
+                log_id = data.get("log_id")
+
+            if not isinstance(data, dict) or response_code not in (200, "200"):
                 logger.warning(
-                    f"[AI Chat] 博查搜索API返回失败代码: "
-                    f"{data.get('code') if isinstance(data, dict) else '响应格式错误'}"
+                    f"[AI Chat] 博查搜索API返回失败，代码: "
+                    f"{response_code if isinstance(data, dict) else '响应格式错误'}，"
+                    f"信息: {response_message!r}，log_id: {log_id!r}"
                 )
                 return "", 0, False
 
             response_data = data.get("data")
             if not isinstance(response_data, dict):
-                logger.warning("[AI Chat] 博查搜索API响应缺少 data 对象")
+                logger.warning(
+                    f"[AI Chat] 博查搜索API响应缺少 data 对象，log_id: {log_id!r}"
+                )
                 return "", 0, False
             web_pages = response_data.get("webPages")
             if not isinstance(web_pages, dict):
-                logger.warning("[AI Chat] 博查搜索API响应缺少 webPages 对象")
+                logger.warning(
+                    f"[AI Chat] 博查搜索API响应缺少 webPages 对象，"
+                    f"log_id: {log_id!r}"
+                )
                 return "", 0, False
             results = web_pages.get("value", [])
             if not isinstance(results, list):
-                logger.warning("[AI Chat] 博查搜索API的结果列表格式错误")
+                logger.warning(
+                    f"[AI Chat] 博查搜索API的结果列表格式错误，"
+                    f"log_id: {log_id!r}"
+                )
                 return "", 0, False
             if not results:
                 return "", 0, True
@@ -1060,8 +1156,12 @@ async def bocha_search(query: str, include: str = "", exclude: str = "") -> tupl
                     continue
 
                 valid_count += 1
-                lines.append(f"{valid_count}. 标题：{title}")
-                lines.append(f"   链接：{url}")
+                if title:
+                    lines.append(f"{valid_count}. 标题：{title}")
+                else:
+                    lines.append(f"{valid_count}. 搜索结果")
+                if url:
+                    lines.append(f"   链接：{url}")
                 if site_name:
                     lines.append(f"   来源：{site_name}")
                 if date_pub:
@@ -1173,6 +1273,7 @@ async def _execute_web_search(messages: list, tool_calls: object) -> int:
         query = args.get("query", "")
         include = args.get("include", "")
         exclude = args.get("exclude", "")
+        freshness = args.get("freshness", "noLimit")
         if (not isinstance(query, str) or not query.strip()
                 or not isinstance(include, str) or not isinstance(exclude, str)):
             messages.append({
@@ -1181,7 +1282,25 @@ async def _execute_web_search(messages: list, tool_calls: object) -> int:
                 "content": "工具调用参数格式错误，请检查参数类型和搜索词后重试"
             })
             continue
-        search_text, sc, search_ok = await bocha_search(query, include=include, exclude=exclude)
+        if not _is_valid_search_freshness(freshness):
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": (
+                    "freshness 参数无效，可选值为 "
+                    + "、".join(THIRD_SEARCH_FRESHNESS_VALUES)
+                    + "，也可使用 YYYY-MM-DD 或 "
+                    + "YYYY-MM-DD..YYYY-MM-DD，请修正后重试"
+                )
+            })
+            continue
+
+        search_text, sc, search_ok = await bocha_search(
+            query.strip(),
+            include=include.strip(),
+            exclude=exclude.strip(),
+            freshness=freshness
+        )
         count += sc
         messages.append({
             "role": "tool",

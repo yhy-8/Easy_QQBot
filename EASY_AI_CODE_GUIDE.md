@@ -101,7 +101,7 @@ NoneBot / OneBot 事件
 |---|---|
 | `THIRD_SEARCH_API_KEY` | 博查 API Key；为空时第三方搜索不会启用 |
 | `THIRD_SEARCH_API_URL` | 博查搜索端点 |
-| `THIRD_SEARCH_COUNT` | 单次最多请求的结果数 |
+| `THIRD_SEARCH_COUNT` | 单次最多请求的结果数；整数会被限制在 1–50，非整数按 10 请求 |
 | `THIRD_SEARCH_TIMEOUT` | 单次博查请求超时 |
 | `MAX_SEARCH_ROUNDS` | 模型最多产生的搜索批次总数；小于等于 0 时禁用第三方工具 |
 | `ENABLE_THIRD_SEARCH` | 第三方搜索总开关 |
@@ -641,7 +641,10 @@ performed=None, count=None
 
 - 工具名：`web_search`。
 - 必填参数：`query`。
-- 可选参数：`include`、`exclude`。
+- 可选参数：`freshness`、`include`、`exclude`。
+- `freshness` 可选 `noLimit`、`oneDay`、`oneWeek`、`oneMonth`、`oneYear`，
+  也可使用 `YYYY-MM-DD` 指定一天，或使用
+  `YYYY-MM-DD..YYYY-MM-DD` 指定日期范围；未提供时默认 `noLimit`。
 - 返回数量和是否生成摘要不交给模型控制。
 
 ### 12.2 `bocha_search()`
@@ -649,9 +652,9 @@ performed=None, count=None
 请求固定包含：
 
 - `query`。
-- `freshness="noLimit"`。
+- 模型选择的 `freshness`；未提供时为 `"noLimit"`。
 - `summary=True`。
-- `count=THIRD_SEARCH_COUNT`。
+- `count`：`THIRD_SEARCH_COUNT` 为整数时限制在 1–50，非整数时使用 10。
 
 `include`、`exclude` 仅在非空时传入。
 
@@ -666,7 +669,10 @@ performed=None, count=None
 - 没有结果：`("", 0, True)`，请求成功但结果为空。
 - 缺 Key、缺查询词、非 200、API 失败码、超时或异常：成功标记为 `False`。
 
-每条结果可包含标题、链接、来源、时间、摘要和与摘要不同的全文概要。响应中的结果会逐条校验；格式异常或没有任何有效正文信息的条目会被跳过，不会导致同批其他有效结果丢失。返回数量只统计可用条目。
+HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg/message` 与
+`log_id`；成功码同时兼容整数 `200` 和字符串 `"200"`。
+
+每条结果可包含标题、链接、来源、时间、摘要和与摘要不同的全文概要。响应中的结果会逐条校验；格式异常或没有任何有效正文信息的条目会被跳过，不会导致同批其他有效结果丢失。标题或链接缺失时不会输出对应的空字段，返回数量只统计可用条目。当前只处理网页结果，只有图片结果时按没有可用结果处理。
 
 ### 12.3 `_execute_web_search()`
 
@@ -676,7 +682,8 @@ performed=None, count=None
 2. 结构完整的调用以规范化 assistant 工具调用写入 `messages`。
 3. 未知工具名通过对应的 `role=tool` 结果反馈给模型。
 4. 解析 `function.arguments` JSON。
-5. 参数不是对象、类型错误或查询词为空时，向 `messages` 追加明确工具错误。
+5. 参数不是对象、类型错误、查询词为空或 `freshness` 不在允许范围内时，
+   向 `messages` 追加明确工具错误。
 6. 调用 `bocha_search()`并累计结果数量。
 7. 将搜索文本、`搜索无结果` 或 `搜索失败` 作为 `role=tool` 结果追加。
 8. 无法组成合法工具消息的结构错误通过系统反馈文本交给模型修正。

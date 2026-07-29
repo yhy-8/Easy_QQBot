@@ -1004,19 +1004,26 @@ THIRD_SEARCH_TOOL = {
                 "freshness": {
                     "type": "string",
                     "description": (
-                        "搜索时间范围：noLimit=不限，oneDay=一天内，"
+                        "仅需限定搜索时间时填写：noLimit=不限，oneDay=一天内，"
                         "oneWeek=一周内，oneMonth=一月内，oneYear=一年内；"
                         "也可使用 YYYY-MM-DD 指定一天，或用 "
-                        "YYYY-MM-DD..YYYY-MM-DD 指定日期范围；默认 noLimit"
+                        "YYYY-MM-DD..YYYY-MM-DD 指定日期范围；"
+                        "无需时间筛选时省略，省略后按 noLimit 处理"
                     )
                 },
                 "include": {
                     "type": "string",
-                    "description": "限定搜索的网站范围，多个域名用|或,分隔（如 qq.com|163.com）"
+                    "description": (
+                        "仅需限定网站范围时填写，多个域名用|或,分隔"
+                        "（如 qq.com|163.com）；不限制则省略"
+                    )
                 },
                 "exclude": {
                     "type": "string",
-                    "description": "排除搜索的网站范围，多个域名用|或,分隔（如 zhihu.com|weibo.com）"
+                    "description": (
+                        "仅需排除网站时填写，多个域名用|或,分隔"
+                        "（如 zhihu.com|weibo.com）；不排除则省略"
+                    )
                 }
             },
             "required": ["query"]

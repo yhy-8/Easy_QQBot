@@ -644,7 +644,9 @@ performed=None, count=None
 - 可选参数：`freshness`、`include`、`exclude`。
 - `freshness` 可选 `noLimit`、`oneDay`、`oneWeek`、`oneMonth`、`oneYear`，
   也可使用 `YYYY-MM-DD` 指定一天，或使用
-  `YYYY-MM-DD..YYYY-MM-DD` 指定日期范围；未提供时默认 `noLimit`。
+  `YYYY-MM-DD..YYYY-MM-DD` 指定日期范围；不限制时间时省略，程序按
+  `noLimit` 请求。
+- `include`、`exclude` 只在需要限定或排除网站时填写，无需限制时省略。
 - 返回数量和是否生成摘要不交给模型控制。
 
 ### 12.2 `bocha_search()`

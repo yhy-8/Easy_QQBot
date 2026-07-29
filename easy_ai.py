@@ -37,7 +37,7 @@ THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
 THIRD_SEARCH_COUNT = 25                                      # 单次搜索返回条数 (1-50)
 THIRD_SEARCH_TIMEOUT = 30                                    # 第三方搜索请求超时时间（秒）
-MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数（AI可多次修正搜索词）
+MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数；小于等于0时不提供第三方搜索工具
 ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关 (True/False)，仅当模型无原生搜索时生效
 
 # ===== 模型配置 =====
@@ -124,7 +124,6 @@ class ParsedMessage:
 @dataclass(frozen=True)
 class SearchResult:
     """模型回复所携带的搜索状态，避免用 int/bool 混合表达不同语义。"""
-    requested: bool = False
     performed: bool | None = False
     count: int | None = None
 
@@ -146,7 +145,6 @@ class ModelReply:
 @dataclass(frozen=True)
 class ModelSelection:
     """一次消息选中的模型和对话模式。"""
-    key: str
     mode: str
     prefix_to_remove: str
     config: dict
@@ -178,6 +176,7 @@ class ModelSelection:
             not self.search_enabled
             and ENABLE_THIRD_SEARCH
             and THIRD_SEARCH_API_KEY
+            and MAX_SEARCH_ROUNDS > 0
         )
 
     @property
@@ -297,7 +296,6 @@ def _parse_openai_native_search_response(
         return ModelReply(
             text=reply_text,
             search=SearchResult(
-                requested=True,
                 performed=None,
                 count=None
             )
@@ -308,7 +306,7 @@ def _parse_openai_native_search_response(
     if isinstance(tool_calls, list) and tool_calls:
         return ModelReply(
             text=reply_text,
-            search=SearchResult(requested=True, performed=True, count=len(tool_calls))
+            search=SearchResult(performed=True, count=len(tool_calls))
         )
 
     for container in (data, data.get("usage"), message):
@@ -324,7 +322,7 @@ def _parse_openai_native_search_response(
             if count > 0:
                 return ModelReply(
                     text=reply_text,
-                    search=SearchResult(requested=True, performed=True, count=count)
+                    search=SearchResult(performed=True, count=count)
                 )
 
         for key in ("num_server_side_tools_used", "num_sources_used"):
@@ -332,7 +330,7 @@ def _parse_openai_native_search_response(
             if type(value) is int and value > 0:
                 return ModelReply(
                     text=reply_text,
-                    search=SearchResult(requested=True, performed=True, count=value)
+                    search=SearchResult(performed=True, count=value)
                 )
 
         for key in ("citations", "sources"):
@@ -340,13 +338,12 @@ def _parse_openai_native_search_response(
             if isinstance(value, list) and value:
                 return ModelReply(
                     text=reply_text,
-                    search=SearchResult(requested=True, performed=True, count=len(value))
+                    search=SearchResult(performed=True, count=len(value))
                 )
 
     return ModelReply(
         text=reply_text,
         search=SearchResult(
-            requested=True,
             performed=None,
             count=None
         )
@@ -1017,26 +1014,53 @@ async def bocha_search(query: str, include: str = "", exclude: str = "") -> tupl
                 return "", 0, False
 
             data = await resp.json()
-            if data.get("code") != 200:
+            if not isinstance(data, dict) or data.get("code") != 200:
                 logger.warning(
-                    f"[AI Chat] 博查搜索API返回失败代码: {data.get('code')}"
+                    f"[AI Chat] 博查搜索API返回失败代码: "
+                    f"{data.get('code') if isinstance(data, dict) else '响应格式错误'}"
                 )
                 return "", 0, False
 
-            web_pages = data.get("data", {}).get("webPages", {})
+            response_data = data.get("data")
+            if not isinstance(response_data, dict):
+                logger.warning("[AI Chat] 博查搜索API响应缺少 data 对象")
+                return "", 0, False
+            web_pages = response_data.get("webPages")
+            if not isinstance(web_pages, dict):
+                logger.warning("[AI Chat] 博查搜索API响应缺少 webPages 对象")
+                return "", 0, False
             results = web_pages.get("value", [])
+            if not isinstance(results, list):
+                logger.warning("[AI Chat] 博查搜索API的结果列表格式错误")
+                return "", 0, False
             if not results:
                 return "", 0, True
 
             lines = ["[网络搜索结果]"]
-            for i, item in enumerate(results, 1):
-                title = item.get("name", "").strip()
-                url = item.get("url", "").strip()
-                snippet = item.get("snippet", "").strip()
-                summary = item.get("summary", "").strip()
-                site_name = item.get("siteName", "").strip()
-                date_pub = item.get("datePublished", "").strip()
-                lines.append(f"{i}. 标题：{title}")
+            valid_count = 0
+            skipped_count = 0
+
+            def clean_text(item: dict, field_name: str) -> str:
+                value = item.get(field_name)
+                return value.strip() if isinstance(value, str) else ""
+
+            for item in results:
+                if not isinstance(item, dict):
+                    skipped_count += 1
+                    continue
+
+                title = clean_text(item, "name")
+                url = clean_text(item, "url")
+                snippet = clean_text(item, "snippet")
+                summary = clean_text(item, "summary")
+                site_name = clean_text(item, "siteName")
+                date_pub = clean_text(item, "datePublished")
+                if not any((title, url, snippet, summary)):
+                    skipped_count += 1
+                    continue
+
+                valid_count += 1
+                lines.append(f"{valid_count}. 标题：{title}")
                 lines.append(f"   链接：{url}")
                 if site_name:
                     lines.append(f"   来源：{site_name}")
@@ -1047,8 +1071,15 @@ async def bocha_search(query: str, include: str = "", exclude: str = "") -> tupl
                 if summary and summary != snippet:
                     lines.append(f"   全文概要：{summary}")
 
+            if skipped_count:
+                logger.warning(
+                    f"[AI Chat] 博查搜索结果中有 {skipped_count} 条格式异常，已跳过"
+                )
+            if valid_count == 0:
+                return "", 0, True
+
             search_text = "\n".join(lines)
-            return search_text, len(results), True
+            return search_text, valid_count, True
 
     except asyncio.TimeoutError:
         logger.warning("[AI Chat] 博查搜索请求超时")
@@ -1059,20 +1090,83 @@ async def bocha_search(query: str, include: str = "", exclude: str = "") -> tupl
 
 
 # ========== 辅助函数：批量执行 web_search 工具调用 ==========
-async def _execute_web_search(messages: list, tool_calls: list) -> int:
+async def _execute_web_search(messages: list, tool_calls: object) -> int:
     """执行搜索工具调用并将结果追加到 messages，返回本批搜索条数。"""
     count = 0
-    for tc in tool_calls:
-        if tc["function"]["name"] != "web_search":
+    valid_calls = []
+    format_errors = []
+
+    if not isinstance(tool_calls, list):
+        format_errors.append("tool_calls 必须是数组")
+        tool_calls = []
+
+    for index, tc in enumerate(tool_calls, 1):
+        if not isinstance(tc, dict):
+            format_errors.append(f"第 {index} 个工具调用不是对象")
             continue
+
+        call_id = tc.get("id")
+        function = tc.get("function")
+        call_type = tc.get("type")
+        if not isinstance(call_id, str) or not call_id.strip():
+            format_errors.append(f"第 {index} 个工具调用缺少有效的 id")
+            continue
+        if call_type != "function":
+            format_errors.append(f"第 {index} 个工具调用的 type 必须是 function")
+            continue
+        if not isinstance(function, dict):
+            format_errors.append(f"第 {index} 个工具调用缺少 function 对象")
+            continue
+
+        function_name = function.get("name")
+        arguments = function.get("arguments")
+        if not isinstance(function_name, str) or not function_name.strip():
+            format_errors.append(f"第 {index} 个工具调用缺少函数名")
+            continue
+        if not isinstance(arguments, str):
+            format_errors.append(f"第 {index} 个工具调用的 arguments 必须是 JSON 字符串")
+            continue
+
+        normalized_call = {
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": function_name,
+                "arguments": arguments
+            }
+        }
+        valid_calls.append(normalized_call)
+
+    if valid_calls:
+        messages.append({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": valid_calls
+        })
+
+    for tc in valid_calls:
+        call_id = tc["id"]
+        function = tc["function"]
+        function_name = function["name"]
+        if function_name != "web_search":
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": (
+                    f"不支持的工具：{function_name}。"
+                    "当前只能调用 web_search，请修正后重试"
+                )
+            })
+            continue
+
         try:
-            args = json.loads(tc["function"]["arguments"])
+            args = json.loads(function["arguments"])
             if not isinstance(args, dict):
                 raise ValueError("工具调用参数必须是 JSON 对象")
         except Exception:
             messages.append({
                 "role": "tool",
-                "tool_call_id": tc["id"],
+                "tool_call_id": call_id,
                 "content": "工具调用参数格式错误，请检查 JSON 格式后重试"
             })
             continue
@@ -1083,7 +1177,7 @@ async def _execute_web_search(messages: list, tool_calls: list) -> int:
                 or not isinstance(include, str) or not isinstance(exclude, str)):
             messages.append({
                 "role": "tool",
-                "tool_call_id": tc["id"],
+                "tool_call_id": call_id,
                 "content": "工具调用参数格式错误，请检查参数类型和搜索词后重试"
             })
             continue
@@ -1091,9 +1185,21 @@ async def _execute_web_search(messages: list, tool_calls: list) -> int:
         count += sc
         messages.append({
             "role": "tool",
-            "tool_call_id": tc["id"],
+            "tool_call_id": call_id,
             "content": search_text if search_text else ("搜索无结果" if search_ok else "搜索失败")
         })
+
+    if format_errors:
+        messages.append({
+            "role": "user",
+            "content": (
+                "[系统工具调用错误反馈]\n"
+                + "\n".join(format_errors)
+                + "\n请严格按照已提供的 tools 定义修正调用格式；"
+                  "如仍需搜索，请在下一轮重新调用工具。"
+            )
+        })
+
     return count
 
 
@@ -1119,14 +1225,13 @@ async def _run_openai_third_search_workflow(
     ]
     current_msg = _get_openai_message(initial_data)
     tool_calls = current_msg.get("tool_calls")
-    if not tool_calls:
+    if tool_calls is None or tool_calls == []:
         return ModelReply(
             text=(current_msg.get("content") or "").strip(),
-            search=SearchResult(requested=True, performed=False, count=0)
+            search=SearchResult(performed=False, count=0)
         )
 
     total_search_count = 0
-    messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
     batch_count = await _execute_web_search(messages, tool_calls)
     total_search_count += batch_count
 
@@ -1164,8 +1269,7 @@ async def _run_openai_third_search_workflow(
             current_msg = _get_openai_message(current_data)
 
         tool_calls = current_msg.get("tool_calls")
-        if tool_calls and not is_last:
-            messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+        if tool_calls is not None and tool_calls != [] and not is_last:
             batch_count = await _execute_web_search(messages, tool_calls)
             total_search_count += batch_count
         else:
@@ -1175,7 +1279,6 @@ async def _run_openai_third_search_workflow(
     return ModelReply(
         text=reply_text,
         search=SearchResult(
-            requested=True,
             performed=True,
             count=total_search_count
         )
@@ -1304,7 +1407,6 @@ class ChatService:
                 break
 
         return ModelSelection(
-            key=selected_model_key,
             mode=selected_mode,
             prefix_to_remove=prefix_to_remove,
             config=MODELS_CONFIG.get(selected_model_key, MODELS_CONFIG["default"])
@@ -1486,7 +1588,6 @@ class ChatService:
     ) -> ModelReply:
         reply_text = _extract_api_reply_text(data, "gemini")
         search_result = SearchResult(
-            requested=search_enabled,
             performed=False,
             count=0 if search_enabled else None
         )
@@ -1503,7 +1604,6 @@ class ChatService:
                 queries = grounding_metadata.get("webSearchQueries", [])
                 if queries:
                     search_result = SearchResult(
-                        requested=True,
                         performed=True,
                         count=len(queries)
                     )
@@ -1511,7 +1611,6 @@ class ChatService:
                     chunks = grounding_metadata.get("groundingChunks", [])
                     chunk_count = len([chunk for chunk in chunks if "web" in chunk])
                     search_result = SearchResult(
-                        requested=True,
                         performed=chunk_count > 0,
                         count=chunk_count
                     )

@@ -2,7 +2,7 @@
 
 > 文档目的：帮助维护者快速理解 `easy_ai.py` 的整体结构、完整调用链、数据库不变量、消息格式、模型协议、搜索行为和异常边界。  
 > 对应代码：当前单文件版 `easy_ai.py`。  
-> 最后核对日期：2026-07-28。
+> 最后核对日期：2026-07-29。
 
 ## 1. 项目定位与设计约束
 
@@ -103,7 +103,7 @@ NoneBot / OneBot 事件
 | `THIRD_SEARCH_API_URL` | 博查搜索端点 |
 | `THIRD_SEARCH_COUNT` | 单次最多请求的结果数 |
 | `THIRD_SEARCH_TIMEOUT` | 单次博查请求超时 |
-| `MAX_SEARCH_ROUNDS` | 模型最多产生的搜索批次总数 |
+| `MAX_SEARCH_ROUNDS` | 模型最多产生的搜索批次总数；小于等于 0 时禁用第三方工具 |
 | `ENABLE_THIRD_SEARCH` | 第三方搜索总开关 |
 
 第三方搜索的启用条件必须同时满足：
@@ -112,6 +112,7 @@ NoneBot / OneBot 事件
 当前模型 search=False
 AND ENABLE_THIRD_SEARCH=True
 AND THIRD_SEARCH_API_KEY 非空
+AND MAX_SEARCH_ROUNDS > 0
 ```
 
 模型原生搜索优先于第三方搜索，两者不会同时注册。
@@ -161,7 +162,6 @@ OneBot 消息解析结果：
 
 | 字段 | 含义 |
 |---|---|
-| `requested` | 此次请求是否启用了搜索能力 |
 | `performed` | `True`=确认发生；`False`=确认未发生；`None`=中转没有提供可核实信息 |
 | `count` | 可核实的搜索/来源/工具数量 |
 
@@ -169,7 +169,7 @@ OneBot 消息解析结果：
 
 1. `count > 0` → `搜索：具体数字`。
 2. `performed=True, count=0` → `搜索：False`。
-3. 其他情况不显示搜索字段，包括已请求搜索但无法核实是否发生的 `requested=True, performed=None`。
+3. 其他情况不显示搜索字段，包括已启用搜索但中转没有提供可核实信息的 `performed=None, count=None`。
 
 因此，“已开启搜索”不等于真的发生了搜索；程序只显示可核实的正数，或搜索实际调用后所有轮次均未取得结果的状态。某一轮失败不会覆盖其他轮已经取得的结果数。
 
@@ -182,7 +182,6 @@ OneBot 消息解析结果：
 
 保存一次用户消息的模型选择：
 
-- `key`：`MODELS_CONFIG` 的键。
 - `mode`：`serious` 或 `casual`。
 - `prefix_to_remove`：需要从 AI 富文本中去掉的 `/A`、`/a` 等前缀。
 - `config`：模型配置字典。
@@ -192,7 +191,7 @@ OneBot 消息解析结果：
 - `api_type`：缺省为 `openai`。
 - `api_url`：Gemini 自动拼成 `.../{model_id}:generateContent`。
 - `vision_enabled`、`search_enabled`：读取能力开关。
-- `use_third_search`：集中判断第三方搜索的三个必要条件。
+- `use_third_search`：集中判断第三方搜索的四个必要条件。
 - `information`：生成快速回复使用的 `模型名，SER/CAS`。
 
 ### 4.5 `PreparedModelRequest`
@@ -600,7 +599,7 @@ data.choices[0].message
 如果搜索已启用，但中转没有返回任何可核实字段，则构造：
 
 ```text
-requested=True, performed=None, count=None
+performed=None, count=None
 ```
 
 最终回复头不显示搜索字段。
@@ -667,22 +666,24 @@ requested=True, performed=None, count=None
 - 没有结果：`("", 0, True)`，请求成功但结果为空。
 - 缺 Key、缺查询词、非 200、API 失败码、超时或异常：成功标记为 `False`。
 
-每条结果可包含标题、链接、来源、时间、摘要和与摘要不同的全文概要。
+每条结果可包含标题、链接、来源、时间、摘要和与摘要不同的全文概要。响应中的结果会逐条校验；格式异常或没有任何有效正文信息的条目会被跳过，不会导致同批其他有效结果丢失。返回数量只统计可用条目。
 
 ### 12.3 `_execute_web_search()`
 
 批量执行一轮 `tool_calls`：
 
-1. 忽略函数名不是 `web_search` 的调用。
-2. 解析 `function.arguments` JSON。
-3. 参数不是对象、类型错误或查询词为空时，向 `messages` 追加明确工具错误。
-4. 调用 `bocha_search()`。
-5. 累计结果数量。
-6. 将搜索文本、`搜索无结果` 或 `搜索失败` 作为 `role=tool` 结果追加。
+1. 校验 `tool_calls` 数组及每项的 `id/type/function/name/arguments` 结构。
+2. 结构完整的调用以规范化 assistant 工具调用写入 `messages`。
+3. 未知工具名通过对应的 `role=tool` 结果反馈给模型。
+4. 解析 `function.arguments` JSON。
+5. 参数不是对象、类型错误或查询词为空时，向 `messages` 追加明确工具错误。
+6. 调用 `bocha_search()`并累计结果数量。
+7. 将搜索文本、`搜索无结果` 或 `搜索失败` 作为 `role=tool` 结果追加。
+8. 无法组成合法工具消息的结构错误通过系统反馈文本交给模型修正。
 
 只返回本批取得的结果数。单次搜索是否成功仅用于向模型反馈 `搜索无结果` 或 `搜索失败`，不再向工作流累计失败状态。
 
-参数格式错误会反馈给模型修正，但不直接算作博查 API 失败。
+工具调用结构错误和参数格式错误都会反馈给模型修正，并占用当前搜索轮次，但不直接算作博查 API 失败。若后续仍有轮次且模型再次请求工具，则继续进入下一轮。
 
 ### 12.4 `_run_openai_third_search_workflow()`
 
@@ -690,14 +691,16 @@ requested=True, performed=None, count=None
 
 1. 从首轮回包读取 `tool_calls`。
 2. 首轮没有调用工具：直接返回正文，标记“已提供搜索能力但未搜索”。
-3. 有工具调用：执行第一批搜索并追加 assistant/tool 消息。
+3. 有工具调用：执行第一批搜索，追加合法的 assistant/tool 消息或结构错误反馈。
 4. 继续调用模型，让模型阅读结果、回答或修正搜索词。
 5. 非最后一轮继续提供搜索工具。
 6. 最后一轮移除工具，并向系统提示词追加“搜索轮次已用完，必须直接回答”。
 7. 累计所有批次的结果数量；总数大于 0 时显示实际总数，即使中间有轮次失败。
-8. 只有所有批次最终都没有取得结果时，才以 `performed=True, count=0` 显示 `搜索：False`，包括空结果、网络错误和请求失败。
+8. 只有所有批次最终都没有取得结果时，才以 `performed=True, count=0` 显示 `搜索：False`，包括空结果、网络错误、请求失败和工具调用格式错误。
 
 在默认 `MAX_SEARCH_ROUNDS=3` 时，搜索批次最多为三批：首轮一批，加上后续最多两批；最后一次模型请求被强制生成文本。
+
+`MAX_SEARCH_ROUNDS <= 0` 时，模型首轮请求不会注册第三方搜索工具，也不会进入该工作流。
 
 后续模型请求非 200 会向上抛出，由主 Handler 的通用异常边界处理。
 

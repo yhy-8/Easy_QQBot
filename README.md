@@ -97,7 +97,7 @@
 
 - **记录**：始终显示，表示本次携带的历史消息条数
 - **图片**：仅当用户本次上传了图片才显示（无图片不显示）
-- **搜索**：OpenAI 兼容模型统一解析 API 返回的搜索/来源数量；第三方搜索各轮合计取得正数结果时显示总数，只有实际调用搜索后始终没有取得任何结果（包括空结果、网络错误或请求失败）才显示 `False`，其余情况不显示
+- **搜索**：OpenAI 兼容模型统一解析 API 返回的搜索/来源数量；第三方搜索各轮合计取得正数结果时显示总数，只有实际调用搜索后始终没有取得任何结果（包括空结果、网络错误、请求失败或工具调用格式错误）才显示 `False`，其余情况不显示
 
 | 场景 | 示例回复前缀 |
 |------|-------------|
@@ -166,7 +166,7 @@ DEFAULT_MODE = "casual"            # 无前缀默认模式："serious"(严肃) �
 THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key (https://open.bocha.cn)
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
 THIRD_SEARCH_COUNT = 25                                      # 单次搜索返回条数 (1-50)
-MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数（AI可多次修正搜索词）
+MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数；小于等于0时不提供第三方搜索工具
 THIRD_SEARCH_TIMEOUT = 30                                   # 第三方搜索请求超时（秒）
 ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关，仅当模型无原生搜索时生效
 
@@ -201,7 +201,7 @@ MODELS_CONFIG = {
 | `DEFAULT_MODE` | 无 /A /a 前缀时的默认模式 |
 | `THIRD_SEARCH_API_KEY` | 博查AI密钥，留空则不启用第三方搜索 |
 | `THIRD_SEARCH_COUNT` | 单次搜索返回给AI的结果条数 |
-| `MAX_SEARCH_ROUNDS` | 最大搜索轮数。AI 每轮可自行决定发起一次或多次搜索，轮次用尽后强制文本回复 |
+| `MAX_SEARCH_ROUNDS` | 最大搜索轮数。AI 每轮可自行决定发起一次或多次搜索，轮次用尽后强制文本回复；小于等于 0 时不提供第三方搜索工具 |
 | `MODELS_CONFIG.*.api_type` | `"openai"` 兼容绝大多数国产模型和中转站；`"gemini"` 用于 Google Gemini |
 | `MODELS_CONFIG.*.vision` | 开启后图片消息会转为 base64 传给模型 |
 | `MODELS_CONFIG.*.search` | 模型自带搜索 → 传原生搜索参数；不勾选 + 开启 `ENABLE_THIRD_SEARCH` → 走博查兜底 |

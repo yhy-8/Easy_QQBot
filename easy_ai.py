@@ -65,7 +65,7 @@ MODELS_CONFIG = {
         "api_url": "https://xxxxxx/v1beta/models",
         "name": "gemini-3-flash",
         "api_type": "gemini",
-        "model_id": "gemini-3-flash",
+        "model_id": "gemini-3-flash-preview",
         "vision": True,
         "search": True
     },
@@ -74,7 +74,7 @@ MODELS_CONFIG = {
         "api_url": "https://xxxxxx/v1beta/models",
         "name": "gemini-3.1-pro",
         "api_type": "gemini",
-        "model_id": "gemini-3.1-pro",
+        "model_id": "gemini-3.1-pro-preview",
         "vision": True,
         "search": True
     }
@@ -114,11 +114,35 @@ _bot_nickname = "AI助手"
 
 
 # ========== 单文件内的结构化领域对象 ==========
+@dataclass(frozen=True)
+class VisualAttachment:
+    """OneBot 图片段中的文件标识及其 summary 占位。"""
+    file_id: str
+    placeholder: str
+
+
 @dataclass
 class ParsedMessage:
     """统一的 OneBot 消息解析结果。"""
     text: str
-    image_ids: list[str] = field(default_factory=list)
+    visual_attachments: list[VisualAttachment] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ResolvedVisual:
+    """完成格式判断后的视觉附件及其最终提示词占位。"""
+    placeholder: str
+    mime_type: str | None = None
+    base64_data: str | None = None
+
+    @property
+    def sendable(self) -> bool:
+        return bool(self.mime_type and self.base64_data)
+
+
+def _visual_placeholder_token(index: int) -> str:
+    """保留视觉附件在富文本中的位置，不会进入最终提示词。"""
+    return f"\0easy_ai_visual:{index}\0"
 
 
 @dataclass(frozen=True)
@@ -608,6 +632,39 @@ class OneBotMessageParser:
             seg_data = getattr(segment, "data", {})
         return seg_type, seg_data if isinstance(seg_data, dict) else {}
 
+    @staticmethod
+    def _image_placeholder(seg_data: dict) -> str:
+        summary = str(seg_data.get("summary") or "").strip()
+        return summary or "[图片]"
+
+    @staticmethod
+    def _image_file_id(seg_data: dict) -> str:
+        file_value = str(seg_data.get("file") or "").strip()
+        file_id = str(seg_data.get("file_id") or "").strip()
+        if file_value.lower() == "marketface" and file_id:
+            return file_id
+        return file_value or file_id
+
+    @classmethod
+    def _render_ai_image(
+            cls,
+            seg_data: dict,
+            visual_attachments: list[VisualAttachment]
+    ) -> str:
+        placeholder = cls._image_placeholder(seg_data)
+        file_id = cls._image_file_id(seg_data)
+        if not file_id:
+            return placeholder
+
+        token = _visual_placeholder_token(len(visual_attachments))
+        visual_attachments.append(
+            VisualAttachment(
+                file_id=file_id,
+                placeholder=placeholder
+            )
+        )
+        return token
+
     async def _format_member_at(self, qq_id: str) -> str:
         if qq_id == "all":
             return "[@全体成员]"
@@ -640,8 +697,7 @@ class OneBotMessageParser:
             except Exception:
                 return "[引用回复(获取信息失败)]"
         if seg_type == "image":
-            summary = seg_data.get("summary", "").strip()
-            return summary if summary else "[图片]"
+            return self._image_placeholder(seg_data)
         if seg_type in ["face", "mface", "bface"]:
             summary = seg_data.get("summary", "").strip()
             return summary if summary else "[表情包]"
@@ -673,17 +729,12 @@ class OneBotMessageParser:
             self,
             seg_type: str,
             seg_data: dict,
-            image_ids: list[str]
+            visual_attachments: list[VisualAttachment]
     ) -> str:
         if seg_type == "text":
             return seg_data.get("text", "")
         if seg_type == "image":
-            summary = seg_data.get("summary", "").strip()
-            if summary:
-                return summary
-            if "file" in seg_data:
-                image_ids.append(seg_data["file"])
-            return "[图片]"
+            return self._render_ai_image(seg_data, visual_attachments)
         if seg_type in ["face", "mface", "bface"]:
             summary = seg_data.get("summary", "").strip()
             return summary if summary else "[表情包]"
@@ -712,7 +763,11 @@ class OneBotMessageParser:
         else:
             return f"[{seg_type}]"
 
-    async def _render_ai_reply(self, seg_data: dict, image_ids: list[str]) -> str:
+    async def _render_ai_reply(
+            self,
+            seg_data: dict,
+            visual_attachments: list[VisualAttachment]
+    ) -> str:
         """只展开当前引用一层，引用内容中的 reply 不再请求和递归解析。"""
         try:
             reply_msg = await self.bot.get_msg(message_id=seg_data.get("id"))
@@ -737,7 +792,7 @@ class OneBotMessageParser:
                     await self._render_quoted_ai_segment(
                         quoted_type,
                         quoted_data,
-                        image_ids
+                        visual_attachments
                     )
                 )
             quoted_content = "".join(quoted_parts)
@@ -752,7 +807,7 @@ class OneBotMessageParser:
             self,
             seg_type: str,
             seg_data: dict,
-            image_ids: list[str]
+            visual_attachments: list[VisualAttachment]
     ) -> str:
         if seg_type == "text":
             return seg_data.get("text", "")
@@ -762,17 +817,15 @@ class OneBotMessageParser:
                 return ""
             return await self._format_member_at(qq_id)
         if seg_type == "image":
-            summary = seg_data.get("summary", "").strip()
-            if summary:
-                return summary
-            if "file" in seg_data:
-                image_ids.append(seg_data["file"])
-            return "[图片]"
+            return self._render_ai_image(seg_data, visual_attachments)
         if seg_type in ["face", "mface", "bface"]:
             summary = seg_data.get("summary", "").strip()
             return summary if summary else "[表情包]"
         if seg_type == "reply":
-            return await self._render_ai_reply(seg_data, image_ids)
+            return await self._render_ai_reply(
+                seg_data,
+                visual_attachments
+            )
         if seg_type == "file":
             file_name = seg_data.get("name") or seg_data.get("file") or "未知文件"
             return f"[文件: {file_name}]"
@@ -797,19 +850,26 @@ class OneBotMessageParser:
             return ParsedMessage(text=clean_text.strip())
 
         text_parts = []
-        image_ids = []
+        visual_attachments = []
         if hasattr(raw_message, "__iter__"):
             for segment in raw_message:
                 seg_type, seg_data = self._segment_type_and_data(segment)
                 if not seg_type:
                     continue
                 if for_ai:
-                    text = await self._render_ai_segment(seg_type, seg_data, image_ids)
+                    text = await self._render_ai_segment(
+                        seg_type,
+                        seg_data,
+                        visual_attachments
+                    )
                 else:
                     text = await self._render_storage_segment(seg_type, seg_data)
                 text_parts.append(text)
 
-        return ParsedMessage(text="".join(text_parts).strip(), image_ids=image_ids)
+        return ParsedMessage(
+            text="".join(text_parts).strip(),
+            visual_attachments=visual_attachments
+        )
 
 
 # ========== 兼容入口：数据库存储文本 ==========
@@ -903,16 +963,42 @@ async def insert_message_to_db(msg_id, group_id, timestamp, user_id, qq_nickname
         logger.exception(f"[AI Chat] 数据库错误，异步写入失败: {e}")
 
 
-# ========== 辅助函数：通过 file_id 获取本地图片并转换为 Base64 ==========
-async def get_local_image_as_base64(bot: Bot, file_id: str, max_retries: int = 5, wait_time: float = 1.0) -> str:
-    if not file_id: return None
+# ========== 辅助函数：解析图片格式，并按需读取为 Base64 ==========
+SUPPORTED_IMAGE_MIME_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+
+
+def _unsupported_visual_placeholder(
+        placeholder: str,
+        format_name: str
+) -> str:
+    notice = f"（未发送：暂不支持 {format_name} 格式）"
+    if placeholder.startswith("[") and placeholder.endswith("]"):
+        return f"{placeholder[:-1]}{notice}]"
+    return f"{placeholder}{notice}"
+
+
+async def resolve_visual_attachment(
+        bot: Bot,
+        attachment: VisualAttachment,
+        max_retries: int = 5,
+        wait_time: float = 1.0
+) -> ResolvedVisual:
+    fallback = ResolvedVisual(placeholder=attachment.placeholder)
+    if not attachment.file_id:
+        return fallback
+
     try:
         # 1. 调用 OneBot 标准接口获取图片信息
-        img_info = await bot.get_image(file=file_id)
+        img_info = await bot.get_image(file=attachment.file_id)
         file_path_str = img_info.get("file", "")
 
         if not file_path_str:
-            return None
+            return fallback
 
         # 2. 路径策略判断：自动 vs 手动覆盖
         raw_path = Path(file_path_str)
@@ -923,8 +1009,20 @@ async def get_local_image_as_base64(bot: Bot, file_id: str, max_retries: int = 5
             # 【自动模式】留空则完全信任 NapCat 返回的底层绝对路径
             file_path = raw_path
 
-        # 3. 轮询等待文件落地，确保文件大小大于 0 字节
-        for attempt in range(max_retries):
+        # 3. 直接信任 NapCat 最终落地文件的后缀，不额外读取文件头。
+        suffix = file_path.suffix.lower()
+        mime_type = SUPPORTED_IMAGE_MIME_TYPES.get(suffix)
+        if not mime_type:
+            format_name = suffix.removeprefix(".").upper() or "未知"
+            return ResolvedVisual(
+                placeholder=_unsupported_visual_placeholder(
+                    attachment.placeholder,
+                    format_name
+                )
+            )
+
+        # 4. 轮询等待文件落地，确保文件大小大于 0 字节
+        for _ in range(max_retries):
             if file_path.exists() and file_path.is_file() and file_path.stat().st_size > 0:
                 break
             await asyncio.sleep(wait_time)
@@ -932,25 +1030,35 @@ async def get_local_image_as_base64(bot: Bot, file_id: str, max_retries: int = 5
             logger.warning(
                 f"[AI Chat] 等待本地图片落地超时，预期路径: {file_path}"
             )
-            return None
+            return fallback
 
-        # 4. 使用线程池读取文件
+        # 5. 使用线程池读取文件
         loop = asyncio.get_event_loop()
+
         def read_file():
             return base64.b64encode(file_path.read_bytes()).decode('utf-8')
 
-        return await loop.run_in_executor(None, read_file)
+        encoded_image = await loop.run_in_executor(None, read_file)
+        return ResolvedVisual(
+            placeholder=attachment.placeholder,
+            mime_type=mime_type,
+            base64_data=encoded_image
+        )
 
     except Exception as e:
         logger.exception(f"[AI Chat] 读取本地图片转Base64失败: {e}")
-    return None
+    return fallback
 
 
-# ========== 辅助函数：专供AI理解的富文本与图片提取(分离下载) ==========
-async def extract_text_and_image_ids(bot: Bot, group_id: int, raw_message) -> tuple[str, list]:
-    """返回：(富文本字符串, 图片file_id列表)"""
+# ========== 辅助函数：专供 AI 理解的富文本与视觉附件提取 ==========
+async def extract_ai_content(
+        bot: Bot,
+        group_id: int,
+        raw_message
+) -> tuple[str, list[VisualAttachment]]:
+    """返回：(富文本字符串, 视觉附件列表)"""
     parsed = await OneBotMessageParser(bot, group_id).parse(raw_message, for_ai=True)
-    return parsed.text, parsed.image_ids
+    return parsed.text, parsed.visual_attachments
 
 
 # ========== 第三方搜索工具定义 ==========
@@ -1539,13 +1647,30 @@ class ChatService:
         )
 
     @staticmethod
-    async def load_base64_images(bot: Bot, image_ids: list[str]) -> list[str]:
-        base64_images = []
-        for file_id in image_ids:
-            encoded_image = await get_local_image_as_base64(bot, file_id)
-            if encoded_image:
-                base64_images.append(encoded_image)
-        return base64_images
+    async def resolve_visuals(
+            bot: Bot,
+            visual_attachments: list[VisualAttachment]
+    ) -> list[ResolvedVisual]:
+        resolved_visuals = []
+        for attachment in visual_attachments:
+            resolved_visuals.append(
+                await resolve_visual_attachment(bot, attachment)
+            )
+        return resolved_visuals
+
+    @staticmethod
+    def apply_visual_placeholders(
+            user_input: str,
+            resolved_visuals: list[ResolvedVisual]
+    ) -> str:
+        """把内部视觉附件标记替换成最终 summary/格式说明。"""
+        for index, visual in enumerate(resolved_visuals):
+            user_input = user_input.replace(
+                _visual_placeholder_token(index),
+                visual.placeholder,
+                1
+            )
+        return user_input
 
     @staticmethod
     async def build_prompts(
@@ -1555,7 +1680,7 @@ class ChatService:
             user_input: str,
             qq_nickname: str,
             group_nickname: str,
-            base64_images: list[str]
+            model_visuals: list[ResolvedVisual]
     ) -> tuple[str, str, list]:
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if group_nickname != qq_nickname:
@@ -1604,11 +1729,13 @@ class ChatService:
                 f"{user_input}\n"
             )
 
-        if selection.vision_enabled and base64_images:
+        if selection.vision_enabled and model_visuals:
             system_prompt += (
-                "\n[系统重要提示：用户本次提问附带了视觉图片。"
-                "请结合你的视觉能力回答上述问题。请明确：这些图片是该用户当下的提问附件，"
-                "绝不是历史聊天记录中的杂图！]"
+                "\n[系统重要提示：用户本次提问附带了视觉附件。"
+                "请结合视觉能力回答上述问题。文本中的视觉占位原样取自 QQ 消息的"
+                "图片 summary；没有 summary 时才使用 [图片]。附件只对应未标注"
+                "“未发送”的占位，并按它们在当前提问中的出现顺序排列。"
+                "这些附件是用户当下的提问内容，绝不是历史聊天记录中的杂图！]"
             )
 
         return system_prompt, final_prompt, rows
@@ -1618,7 +1745,7 @@ class ChatService:
             selection: ModelSelection,
             system_prompt: str,
             final_prompt: str,
-            base64_images: list[str]
+            model_visuals: list[ResolvedVisual]
     ) -> PreparedModelRequest:
         model_config = selection.config
         native_search_adapter = ""
@@ -1630,13 +1757,16 @@ class ChatService:
             }
 
             user_message_content = []
-            if selection.vision_enabled and base64_images:
+            if selection.vision_enabled and model_visuals:
                 user_message_content.append({"type": "text", "text": final_prompt})
-                for encoded_image in base64_images:
+                for visual in model_visuals:
                     user_message_content.append({
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{encoded_image}"
+                            "url": (
+                                f"data:{visual.mime_type};base64,"
+                                f"{visual.base64_data}"
+                            )
                         }
                     })
             else:
@@ -1676,12 +1806,12 @@ class ChatService:
                 "x-goog-api-key": model_config["api_key"]
             }
             parts = [{"text": final_prompt}]
-            if selection.vision_enabled and base64_images:
-                for encoded_image in base64_images:
+            if selection.vision_enabled and model_visuals:
+                for visual in model_visuals:
                     parts.append({
                         "inlineData": {
-                            "mimeType": "image/jpeg",
-                            "data": encoded_image
+                            "mimeType": visual.mime_type,
+                            "data": visual.base64_data
                         }
                     })
 
@@ -1788,11 +1918,21 @@ class ChatService:
             event: GroupMessageEvent,
             selection: ModelSelection,
             user_input: str,
-            image_ids: list[str],
+            visual_attachments: list[VisualAttachment],
             qq_nickname: str,
             group_nickname: str
     ) -> ChatCompletion:
-        base64_images = await self.load_base64_images(bot, image_ids)
+        resolved_visuals = await self.resolve_visuals(
+            bot,
+            visual_attachments
+        )
+        user_input = self.apply_visual_placeholders(
+            user_input,
+            resolved_visuals
+        )
+        model_visuals = [
+            visual for visual in resolved_visuals if visual.sendable
+        ]
         system_prompt, final_prompt, rows = await self.build_prompts(
             bot,
             event,
@@ -1800,13 +1940,13 @@ class ChatService:
             user_input,
             qq_nickname,
             group_nickname,
-            base64_images
+            model_visuals
         )
         request = self.build_model_request(
             selection,
             system_prompt,
             final_prompt,
-            base64_images
+            model_visuals
         )
 
         session = await get_http_session()
@@ -1818,7 +1958,7 @@ class ChatService:
         return ChatCompletion(
             reply=reply,
             history_count=len(rows),
-            image_count=len(base64_images)
+            image_count=len(model_visuals)
         )
 
 
@@ -1922,8 +2062,12 @@ async def handle_ai_chat(bot: Bot, event: Event):
     model_config = selection.config
     model_information = selection.information
 
-    # 1. 提取富文本内容与图片 ID
-    rich_user_input, image_ids = await extract_text_and_image_ids(bot, event.group_id, event.original_message)
+    # 1. 提取富文本内容与视觉附件
+    rich_user_input, visual_attachments = await extract_ai_content(
+        bot,
+        event.group_id,
+        event.original_message
+    )
 
     if selection.prefix_to_remove:
         rich_user_input = rich_user_input.replace(
@@ -1934,13 +2078,13 @@ async def handle_ai_chat(bot: Bot, event: Event):
     user_input = rich_user_input.strip()
 
     # 2. 校验 1：啥都没有输入也没有图片
-    if not user_input and not image_ids:
+    if not user_input and not visual_attachments:
         hyw_msg = MessageSegment.at(event.user_id) + f"（{model_information}）何意味"
         await send_and_save(bot, event, chat_handler, hyw_msg, is_finish=True)
         return
 
     # 3. 校验 2：带了图片但当前模型不支持 Vision
-    if image_ids and not selection.vision_enabled:
+    if visual_attachments and not selection.vision_enabled:
         err_msg = MessageSegment.at(event.user_id) + f"（{model_information}）该模型不具备图片识别能力！"
         await send_and_save(bot, event, chat_handler, err_msg, is_finish=True)
         return
@@ -1957,7 +2101,7 @@ async def handle_ai_chat(bot: Bot, event: Event):
             event,
             selection,
             user_input,
-            image_ids,
+            visual_attachments,
             qq_nickname,
             group_nickname
         )

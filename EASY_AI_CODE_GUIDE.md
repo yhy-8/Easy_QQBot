@@ -47,10 +47,11 @@ NoneBot / OneBot 事件
    └─ handle_ai_chat()
       ├─ 先保存触发消息
       ├─ ChatService.select_model()
-      ├─ extract_text_and_image_ids()
+      ├─ extract_ai_content()
       ├─ 可选发送 Waiting……
       └─ ChatService.complete()
-         ├─ load_base64_images()
+         ├─ resolve_visuals()
+         ├─ apply_visual_placeholders()
          ├─ build_prompts()
          │  ├─ get_dynamic_history_length()
          │  ├─ _load_history_rows()
@@ -136,6 +137,10 @@ AND MAX_SEARCH_ROUNDS > 0
 - `/a`、`/b` 等小写前缀：选择对应大写键，并强制随性模式。
 - 只有键名全为大写的非 `default` 项参与前缀匹配。
 - 当前按字典插入顺序匹配；若以后同时存在 `A` 和 `AB`，应注意短前缀可能先匹配。
+- B 的显示名称为 `gemini-3-flash`，实际模型 ID 为
+  `gemini-3-flash-preview`。
+- C 的显示名称为 `gemini-3.1-pro`，实际模型 ID 为
+  `gemini-3.1-pro-preview`。
 
 ### 3.4 提示词
 
@@ -152,11 +157,25 @@ AND MAX_SEARCH_ROUNDS > 0
 OneBot 消息解析结果：
 
 - `text`：数据库存储文本或 AI 富文本。
-- `image_ids`：需要进一步下载并发送给视觉模型的图片 `file_id`。
+- `visual_attachments`：需要进一步判断格式的视觉附件。
 
 数据库解析通常只使用 `text`；AI 解析同时使用二者。
 
-### 4.2 `SearchResult`
+### 4.2 `VisualAttachment` 与 `ResolvedVisual`
+
+`VisualAttachment` 保留 OneBot `image` 段的两项必要信息：
+
+- `file_id`：供 `get_image()` 查询本地文件。
+- `placeholder`：原消息的 `summary`；没有 `summary` 时为 `[图片]`。
+
+`ResolvedVisual` 表示完成本地路径和后缀判断后的视觉附件：
+
+- `placeholder`：最终放入 AI 文本的原标签或格式不支持说明。
+- `mime_type`：支持格式对应的 MIME；不发送时为 `None`。
+- `base64_data`：成功读取后的图片数据；不发送时为 `None`。
+- `sendable`：同时具有 MIME 和 Base64 数据时为真。
+
+### 4.3 `SearchResult`
 
 统一表达一次回复的搜索状态：
 
@@ -173,12 +192,12 @@ OneBot 消息解析结果：
 
 因此，“已开启搜索”不等于真的发生了搜索；程序只显示可核实的正数，或搜索实际调用后所有轮次均未取得结果的状态。某一轮失败不会覆盖其他轮已经取得的结果数。
 
-### 4.3 `ModelReply`
+### 4.4 `ModelReply`
 
 - `text`：模型最终正文。
 - `search`：对应的 `SearchResult`。
 
-### 4.4 `ModelSelection`
+### 4.5 `ModelSelection`
 
 保存一次用户消息的模型选择：
 
@@ -194,7 +213,7 @@ OneBot 消息解析结果：
 - `use_third_search`：集中判断第三方搜索的四个必要条件。
 - `information`：生成快速回复使用的 `模型名，SER/CAS`。
 
-### 4.5 `PreparedModelRequest`
+### 4.6 `PreparedModelRequest`
 
 表示已组装完、可直接发送的请求：
 
@@ -203,7 +222,7 @@ OneBot 消息解析结果：
 - 原生搜索需要保留：`native_search_adapter`。
 - `use_third_search` 表示发送首轮后是否进入工具调用工作流。
 
-### 4.6 `ChatCompletion`
+### 4.7 `ChatCompletion`
 
 交回 Handler 的完整结果：
 
@@ -211,7 +230,7 @@ OneBot 消息解析结果：
 - `history_count`：实际传入提示词的历史消息行数。
 - `image_count`：成功读取并实际发给模型的图片数。
 
-### 4.7 自定义异常
+### 4.8 自定义异常
 
 - `UnsupportedAPITypeError`：模型 `api_type` 不是 `openai` 或 `gemini`。
 - `ModelHTTPError`：正式模型首轮请求返回非 200。
@@ -414,8 +433,8 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 | `at` 机器人自己 | `[@机器人ID]` | 删除，避免把触发动作当问题 | 按普通成员格式化 |
 | `at` 其他成员 | `[@QQ号]` | 尽量解析昵称 | 尽量解析昵称 |
 | `at all` | `[@全体成员]` | `[@全体成员]` | `[@全体成员]` |
-| `image` 有 `summary` | 保存摘要 | 保存摘要，不进入视觉列表 | 保存摘要，不进入视觉列表 |
-| `image` 无 `summary` | `[图片]` | `[图片]`，收集 `file` | `[图片]`，收集 `file` |
+| `image` 有 `summary` | 原样保存摘要 | 以摘要为标签并收集文件标识，随后按后缀处理 | 同当前 AI 消息 |
+| `image` 无 `summary` | `[图片]` | 以 `[图片]` 为标签并收集文件标识，随后按后缀处理 | 同当前 AI 消息 |
 | `face/mface/bface` | 摘要或 `[表情包]` | 摘要或 `[表情包]` | 摘要或 `[表情包]` |
 | `record` | `[语音]` | `[语音]` | `[语音]` |
 | `video` | `[视频]` | `[视频]` | `[视频]` |
@@ -448,7 +467,9 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 渲染“被引用消息内部”的单个段：
 
-- 图片与当前消息共用同一个 `image_ids` 列表，因此引用图片可以实际发送给视觉模型。
+- 图片始终读取 `summary` 作为标签；没有 `summary` 时使用 `[图片]`。
+- 只要能够取得文件标识，就与当前消息共用同一个 `visual_attachments` 列表。
+- 支持格式的引用视觉附件会实际发送；不支持格式会在原标签上追加未发送说明。
 - 文件、语音、视频等保留明确占位。
 - 若引用内容里再次出现 `reply`，只输出 `[引用回复（未继续展开）]`。
 - 不调用 `_render_ai_reply()`，因此不会继续套娃或无限请求。
@@ -474,7 +495,10 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 - 删除用户对机器人的 `at`。
 - 对其他成员的 `at` 尽量补全昵称。
 - 外层 `reply` 进入 `_render_ai_reply()`。
-- 无摘要图片加入视觉列表。
+- 所有图片段都以 `summary`（缺省为 `[图片]`）作为标签，并在能取得文件标识时
+  加入待处理列表。
+- JPEG/JPG、PNG、WebP 可以发送；其他格式在原标签上追加“暂不支持该格式”的
+  说明性文字。
 - 未知类型使用 `[seg_type]` 兜底。
 
 ### 7.9 `parse()`
@@ -485,14 +509,15 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 - 输入是普通字符串且用于 AI：返回空文本；正常实时事件应传 OneBot 消息对象。
 - 输入可迭代：逐段解析并拼接。
 - 最后对整体文本 `strip()`。
-- 返回 `ParsedMessage(text, image_ids)`。
+- 返回 `ParsedMessage(text, visual_attachments)`。
 
 ### 7.10 两个兼容入口
 
 - `parse_message_content()`：数据库存储入口，只返回 `.text`。
-- `extract_text_and_image_ids()`：AI 富文本入口，返回 `(text, image_ids)` 元组。
+- `extract_ai_content()`：AI 富文本入口，返回 `(text, visual_attachments)` 元组。
 
-这两个函数保留旧调用方式，外部代码无需认识 `ParsedMessage`。
+这两个函数分别向数据库流程和 AI Handler 提供简单结果，调用方无需直接操作
+`ParsedMessage`。
 
 ## 8. 动态历史记录长度
 
@@ -532,37 +557,87 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 ## 9. 图片处理
 
-### 9.1 `get_local_image_as_base64()`
+### 9.1 `summary` 是通用标签
+
+代码不枚举 `summary` 的具体内容，也不把某一种标签当作特殊类型：
+
+- `image.summary` 非空：原样作为该视觉附件的文字标签。
+- `image.summary` 为空：使用 `[图片]`。
+- 能取得文件标识：无论标签内容是什么，都继续判断本地文件后缀。
+- 无法取得文件标识：只保留标签，不附带视觉数据。
+
+因此 `[动画表情]` 只是可能出现的一种 `summary`，其他标签完全沿用相同流程。
+数据库仍保存原 `summary` 或 `[图片]`；当前消息和引用消息则在保留该标签的同时，
+尽可能把支持格式的视觉内容交给模型。
+
+### 9.2 视觉附件发送规范
+
+只把以下格式的图片内容发送给模型：
+
+- JPEG/JPG：`image/jpeg`。
+- PNG：`image/png`。
+- WebP：`image/webp`。
+
+格式以 `get_image()` 返回的最终本地文件后缀为准，不读取文件头进行二次识别。
+后缀统一转为小写，`.jpg` 和 `.jpeg` 均映射为 `image/jpeg`。GIF、HEIC、
+HEIF、BMP 及其他格式不发送视觉内容，而是在原 `summary` 标签上追加说明：
+
+```text
+[图片（未发送：暂不支持 GIF 格式）]
+[动画表情（未发送：暂不支持 GIF 格式）]
+[其他 summary（未发送：暂不支持 BMP 格式）]
+```
+
+模型不会看到 NapCat 哈希缓存名、本地路径或 URL。支持格式保留原标签并附带视觉
+数据；不支持格式使用追加了说明的标签，且不附带视觉数据。
+
+读取失败仍保留原标签，但不附带视觉数据，也不计入回复头的图片数量。
+
+这种策略有意信任 QQ/NapCat 最终落地的扩展名。如果有人故意伪造后缀，可能导致
+上游拒绝图片，但不为这种低概率异常额外读取文件头。
+
+### 9.3 `resolve_visual_attachment()`
 
 处理流程：
 
-1. `file_id` 为空时返回 `None`。
+1. `file_id` 为空时返回只含原标签的不可发送结果。
 2. 调用 `bot.get_image(file=file_id)` 获取 NapCat 本地路径。
 3. `IMAGE_BASE_DIR` 为空：直接使用返回路径。
 4. `IMAGE_BASE_DIR` 非空：只取返回路径的文件名，与映射目录拼接。
-5. 轮询等待文件存在、是普通文件且大小大于 0。
-6. 在线程池读取文件，避免同步磁盘读取阻塞事件循环。
-7. 转为 Base64 字符串。
+5. 根据最终本地文件的后缀映射 MIME；不支持时直接返回格式说明。
+6. 支持的格式继续等待文件落地，并确认是非空普通文件。
+7. 在线程池读取文件并转换为 Base64。
+8. 返回 `ResolvedVisual`。
 
-失败或等待超时的图片会被跳过，最终回复头的图片数是“成功读取并实际发送”的数量，而不是原消息中的图片段数量。
+### 9.4 `ChatService.resolve_visuals()` 与占位组装
 
-当前 OpenAI 和 Gemini 请求都把图片声明为 JPEG MIME/Data URL；这是保留的既有行为，即使底层文件扩展名可能不是 `.jpg`。
+`resolve_visuals()` 按原消息顺序逐个调用 `resolve_visual_attachment()`。当前保持串行，
+避免改变图片顺序。
 
-### 9.2 `ChatService.load_base64_images()`
+解析器先在富文本原位置写入内部标记，并把同一个图片段的 `file_id` 与
+`summary` 标签放进 `VisualAttachment`。`apply_visual_placeholders()` 在格式判断
+完成后，将每个内部标记替换为对应的原标签或未发送说明。这样不需要根据
+`[图片]`、`[动画表情]` 或其他标签做字符串猜测，也不会写死任何 `summary`。
 
-按顺序逐张调用 `get_local_image_as_base64()`，只保留成功结果。当前是串行读取，以保持行为简单和顺序稳定。
+之后只把 `sendable=True` 的视觉附件交给协议层。系统提示会告诉模型：文字标签
+原样来自 QQ 的图片 `summary`，附件顺序与未标注“未发送”的标签顺序一致。
+
+最终回复头的图片数是成功读取并实际发送的数量，而不是原消息中的图片段数量。
 
 ## 10. API 正文解析
 
 ### 10.1 `_get_openai_message()`
 
-安全取得：
+按标准 OpenAI 兼容响应取得：
 
 ```text
 data.choices[0].message
 ```
 
-任何一级类型不正确或缺失都返回空字典，避免大量直接索引导致异常。
+字段缺失、列表为空或首项不是对象时通常返回空字典。这里默认服务器遵守标准
+响应结构；若服务器以 HTTP 200 返回严重畸形的 `choices` 类型，异常会交给主
+Handler 的通用错误边界处理，不额外兼容这种服务端错误。Gemini 的
+`candidates` 采用相同原则。
 
 ### 10.2 `_extract_api_reply_text()`
 
@@ -728,6 +803,9 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
 [月-日 时:分] 群名片（QQ昵称：昵称）: 消息内容
 ```
 
+历史发言人、当前提问者和当前引用的原发言人使用相同的显示规则：群名片与
+QQ 昵称不同时显示 `群名片（QQ昵称：昵称）`，相同时只显示一个名称。
+
 历史顺序是从旧到新。
 
 ### 13.2 `ChatService.build_prompts()`
@@ -772,7 +850,7 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
 - 无视觉图片时，用户 `content` 是字符串。
 - 有视觉图片时，用户 `content` 是多段列表：
   - 第一段是文本。
-  - 后续是 `image_url` Data URL。
+  - 后续是使用实际 MIME 类型的 `image_url` Data URL。
 - 原生搜索开启时调用 `_enable_openai_native_search()`。
 - 无原生搜索但满足第三方条件时注册 `THIRD_SEARCH_TOOL`。
 
@@ -781,7 +859,7 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
 - 认证：`x-goog-api-key`。
 - 系统提示词放在 `systemInstruction.parts`。
 - 用户文本和图片放在 `contents[0].parts`。
-- 图片使用 `inlineData`。
+- 图片使用 `inlineData`，`mimeType` 与实际 JPEG、PNG 或 WebP 格式一致。
 - 原生搜索使用 `googleSearch` 工具。
 
 未知 `api_type` 抛出 `UnsupportedAPITypeError`。
@@ -803,13 +881,14 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
 
 一次正式对话的总编排：
 
-1. 下载并编码图片。
-2. 构建系统提示词、用户提示词和历史行。
-3. 构建对应协议请求。
-4. 获取共享 HTTP 会话。
-5. 发送请求并解析。
-6. 空正文替换为 `（模型API拒绝回复）`。
-7. 返回正文、实际历史数和实际图片数。
+1. 按后缀解析图片，并对支持格式进行 Base64 编码。
+2. 把格式判断结果写入最终用户提示词，只保留可发送图片。
+3. 构建系统提示词、用户提示词和历史行。
+4. 构建对应协议请求。
+5. 获取共享 HTTP 会话。
+6. 发送请求并解析。
+7. 空正文替换为 `（模型API拒绝回复）`。
+8. 返回正文、实际历史数和实际图片数。
 
 `complete()` 不直接发送 QQ 消息，也不直接操作数据库，使业务层可单独测试。
 
@@ -921,8 +1000,12 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
 | `validate_configuration` | 启动钩子 | 非阻断地报告配置问题 |
 | `init_db` | 启动钩子 | 设置 WAL 并初始化表 |
 | `get_dynamic_history_length` | 异步函数 | 算法或 AI 决定历史条数 |
+| `_visual_placeholder_token` | 函数 | 为视觉附件保留原富文本位置 |
 | `OneBotMessageParser.__init__` | 方法 | 保存 Bot 与群号上下文 |
 | `OneBotMessageParser._segment_type_and_data` | 静态方法 | 兼容字典和 MessageSegment |
+| `OneBotMessageParser._image_placeholder` | 静态方法 | 读取任意 summary，缺省为 `[图片]` |
+| `OneBotMessageParser._image_file_id` | 静态方法 | 选择可供 `get_image()` 使用的文件标识 |
+| `OneBotMessageParser._render_ai_image` | 类方法 | 保留图片位置并登记视觉附件 |
 | `OneBotMessageParser._format_member_at` | 方法 | 把 QQ ID 转成可读 `@` |
 | `OneBotMessageParser._render_storage_segment` | 方法 | 渲染数据库单段 |
 | `OneBotMessageParser._render_quoted_ai_segment` | 方法 | 渲染一层引用内部单段 |
@@ -932,9 +1015,10 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
 | `parse_message_content` | 兼容函数 | 返回数据库存储文本 |
 | `send_and_save` | 异步函数 | 发送、重试、保存机器人消息并结束 |
 | `insert_message_to_db` | 异步函数 | 在单事务内写消息和用户资料 |
-| `get_local_image_as_base64` | 异步函数 | 获取、等待、读取并编码图片 |
+| `_unsupported_visual_placeholder` | 函数 | 在任意原 summary 标签上追加格式不支持说明 |
+| `resolve_visual_attachment` | 异步函数 | 按后缀解析视觉附件、生成占位并按需编码 |
 | `read_file` | 局部函数 | 在线程池中读取图片并转 Base64 |
-| `extract_text_and_image_ids` | 兼容函数 | 返回 AI 富文本和图片 ID |
+| `extract_ai_content` | 函数 | 返回 AI 富文本和视觉附件 |
 | `bocha_search` | 异步函数 | 调用并格式化博查结果 |
 | `_execute_web_search` | 异步函数 | 执行一批工具调用 |
 | `_run_openai_third_search_workflow` | 异步函数 | 管理多轮第三方搜索 |
@@ -945,7 +1029,8 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
 | `_format_history_text` | 函数 | 生成模型可读群聊历史 |
 | `_format_reply_prefix` | 函数 | 生成固定正式回复头 |
 | `ChatService.select_model` | 静态方法 | 解析模型前缀和对话模式 |
-| `ChatService.load_base64_images` | 静态异步方法 | 读取所有有效图片 |
+| `ChatService.resolve_visuals` | 静态异步方法 | 按顺序解析所有视觉附件 |
+| `ChatService.apply_visual_placeholders` | 静态方法 | 将格式结果写回最终用户提示词 |
 | `ChatService.build_prompts` | 静态异步方法 | 准备身份、历史和提示词 |
 | `ChatService.build_model_request` | 静态方法 | 生成 OpenAI/Gemini 请求 |
 | `ChatService.parse_gemini_reply` | 静态方法 | 解析 Gemini 正文和搜索数 |
@@ -1002,7 +1087,7 @@ logger.error(f"失败: {e}")
 | 动态历史模型调用 | 可能是网络、JSON、协议或会话问题 | 使用默认条数 |
 | 机器人消息存库 | 发送已成功，但身份解析或存库失败 | 不影响 Handler 结束 |
 | 数据库写入 | 需要定位连接、表、锁或类型问题 | 当前消息不入库 |
-| 图片读取/Base64 | 涉及 OneBot、路径、权限和线程池 | 跳过该图 |
+| 图片读取/Base64 | 涉及 OneBot、路径、权限和线程池 | 不发送图片数据，保留原标签 |
 | 博查搜索通用异常 | 涉及网络、JSON 和数据结构 | 标记搜索失败 |
 | 历史查询 | 需要区分表、连接或数据问题 | 使用空历史 |
 | 昵称映射查询 | 需要定位数据库问题 | 使用原 ID/默认昵称 |
@@ -1016,7 +1101,8 @@ logger.error(f"失败: {e}")
 1. 配置检查只报告，不阻止启动。
 2. 数据库读失败时使用空历史或默认历史条数。
 3. 单条历史同步失败不影响其他记录。
-4. 图片读取失败只丢弃对应图片，不中断文字问题。
+4. 图片读取失败只丢弃对应二进制数据，保留原 `summary` 标签（缺省为 `[图片]`），
+   不中断文字问题。
 5. 引用获取失败保留占位文本。
 6. 引用只展开一层，避免套娃请求。
 7. 未知非空消息段保留 `[seg_type]`。
@@ -1081,12 +1167,12 @@ git diff --check
 
 | 改动区域 | 建议验证 |
 |---|---|
-| 消息解析 | 文本、at、图片、表情、文件、语音、视频、引用、未知类型 |
-| 引用解析 | `get_msg` 只调用一次；引用图片进入视觉列表；嵌套引用不展开 |
+| 消息解析 | 文本、at、无 summary 图片、任意 summary 图片、文件、语音、视频、引用、未知类型 |
+| 引用解析 | `get_msg` 只调用一次；所有含文件标识的图片进入视觉列表；嵌套引用不展开 |
 | 数据库 | 比较 SQL 模板、事务顺序和四类保存入口 |
 | 模型选择 | 默认、大写、小写、未知前缀 |
-| OpenAI | 纯文本、视觉、原生搜索、第三方搜索 |
-| Gemini | 纯文本、`inlineData`、`googleSearch`、grounding 计数 |
+| OpenAI | 纯文本、JPEG/PNG/WebP Data URL、格式拦截、原生搜索、第三方搜索 |
+| Gemini | 纯文本、JPEG/PNG/WebP `inlineData`、格式拦截、`googleSearch`、grounding 计数 |
 | 第三方搜索 | 无工具调用、单轮、多轮、无结果、失败、参数错误 |
 | 发送 | 快速回复、正式回复重试、存库失败、`finish()` |
 

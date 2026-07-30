@@ -96,7 +96,7 @@
 正式回复前缀格式为：`模型：{模型名}，记录：{上下文条数}[，图片：{n}][，搜索：{n或False}]`
 
 - **记录**：始终显示，表示本次携带的历史消息条数
-- **图片**：仅当用户本次上传了图片才显示（无图片不显示）
+- **图片**：成功发送给模型的图片数量，包括当前消息及引用消息中的图片；没有成功读取的图片不计入
 - **搜索**：原生或第三方搜索取得结果时显示数量；第三方搜索实际调用后仍没有结果（包括请求失败）时显示 `False`；无法确认搜索状态时不显示
 
 | 场景 | 示例回复前缀 |
@@ -157,7 +157,7 @@ ENABLE_QUICK_ACK = True            # 收到提问后立刻回复"Waiting……" 
 ENABLE_AI_HISTORY_DECISION = True  # AI 动态决定历史记录条数 (True/False)
 DYNAMIC_HISTORY_MODEL = "default"  # 决定上下文条数所用的模型 (对应 MODELS_CONFIG 键名)
 DYNAMIC_HISTORY_TIMEOUT = 30       # 前置AI超时时间（秒）
-AI_CHAT_TIMEOUT = 120              # 正式聊天超时时间（秒）
+AI_CHAT_TIMEOUT = 120              # 正式聊天中每次模型请求的超时时间（秒）
 
 IMAGE_BASE_DIR = ""                # 图片缓存目录。同机部署留空；跨Docker填挂载路径
 DEFAULT_MODE = "casual"            # 无前缀默认模式："serious"(严肃) 或 "casual"(随性)
@@ -190,12 +190,12 @@ MODELS_CONFIG = {
 | 配置项 | 说明 |
 |--------|------|
 | `ALLOWED_GROUPS` | 允许机器人响应的群号列表 |
-| `DB_PATH` | SQLite 数据库路径，用于存储聊天记录和用户信息 |
+| `DB_PATH` | SQLite 数据库路径；请确保上级目录存在且机器人有写入权限 |
 | `ENABLE_QUICK_ACK` | 是否先回复"Waiting……"提示，缓解等待焦虑 |
 | `ENABLE_AI_HISTORY_DECISION` | 开启后由AI根据群聊活跃度动态决定读取多少条历史 |
 | `DYNAMIC_HISTORY_MODEL` | 上述决策使用的模型，通常用最便宜的模型 |
 | `DYNAMIC_HISTORY_TIMEOUT` | 前置决策AI超时秒数 |
-| `AI_CHAT_TIMEOUT` | 正式聊天(首轮请求)超时秒数 |
+| `AI_CHAT_TIMEOUT` | 正式聊天中每次模型请求的超时秒数，包括搜索后的后续请求 |
 | `THIRD_SEARCH_TIMEOUT` | 第三方搜索超时秒数|
 | `IMAGE_BASE_DIR` | 图片路径：同机留空；跨Docker填容器内挂载的绝对路径 |
 | `DEFAULT_MODE` | 无 /A /a 前缀时的默认模式 |

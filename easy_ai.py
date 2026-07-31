@@ -116,9 +116,10 @@ _bot_nickname = "AI助手"
 # ========== 单文件内的结构化领域对象 ==========
 @dataclass(frozen=True)
 class VisualAttachment:
-    """OneBot 图片段中的文件标识及其 summary 占位。"""
-    file_id: str
+    """OneBot 图片段中的 summary 标签及可用文件来源。"""
     placeholder: str
+    file_id: str = ""
+    local_path: str = ""
 
 
 @dataclass
@@ -653,14 +654,12 @@ class OneBotMessageParser:
     ) -> str:
         placeholder = cls._image_placeholder(seg_data)
         file_id = cls._image_file_id(seg_data)
-        if not file_id:
-            return placeholder
-
         token = _visual_placeholder_token(len(visual_attachments))
         visual_attachments.append(
             VisualAttachment(
+                placeholder=placeholder,
                 file_id=file_id,
-                placeholder=placeholder
+                local_path=str(seg_data.get("path") or "").strip()
             )
         )
         return token
@@ -963,23 +962,52 @@ async def insert_message_to_db(msg_id, group_id, timestamp, user_id, qq_nickname
         logger.exception(f"[AI Chat] 数据库错误，异步写入失败: {e}")
 
 
-# ========== 辅助函数：解析图片格式，并按需读取为 Base64 ==========
-SUPPORTED_IMAGE_MIME_TYPES = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".webp": "image/webp",
-}
-
-
-def _unsupported_visual_placeholder(
-        placeholder: str,
-        format_name: str
-) -> str:
-    notice = f"（未发送：暂不支持 {format_name} 格式）"
+# ========== 辅助函数：解析视觉附件，并按需读取为 Base64 ==========
+def _append_visual_notice(placeholder: str, reason: str) -> str:
+    """在原视觉标签上追加未发送原因。"""
+    notice = f"（未发送：{reason}）"
     if placeholder.startswith("[") and placeholder.endswith("]"):
         return f"{placeholder[:-1]}{notice}]"
     return f"{placeholder}{notice}"
+
+
+def _detect_image_format(header: bytes) -> tuple[str | None, str | None]:
+    """根据文件头返回：(格式名称, 支持格式的 MIME)。"""
+    if header.startswith(b"\xff\xd8\xff"):
+        return "JPEG", "image/jpeg"
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "PNG", "image/png"
+    if (
+            len(header) >= 12
+            and header.startswith(b"RIFF")
+            and header[8:12] == b"WEBP"
+    ):
+        return "WebP", "image/webp"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return "GIF", None
+    if header.startswith(b"BM"):
+        return "BMP", None
+    if header.startswith((b"II*\x00", b"MM\x00*")):
+        return "TIFF", None
+    if header.startswith((b"\x00\x00\x01\x00", b"\x00\x00\x02\x00")):
+        return "ICO", None
+
+    if len(header) >= 12 and header[4:8] == b"ftyp":
+        brands = {
+            header[index:index + 4]
+            for index in range(8, len(header) - 3, 4)
+        }
+        if brands & {b"avif", b"avis"}:
+            return "AVIF", None
+        if brands & {b"heic", b"heix", b"hevc", b"hevx"}:
+            return "HEIC", None
+        if brands & {b"mif1", b"msf1"}:
+            return "HEIF", None
+
+    stripped_header = header.lstrip().lower()
+    if stripped_header.startswith(b"<svg") or b"<svg" in stripped_header:
+        return "SVG", None
+    return None, None
 
 
 async def resolve_visual_attachment(
@@ -988,19 +1016,34 @@ async def resolve_visual_attachment(
         max_retries: int = 5,
         wait_time: float = 1.0
 ) -> ResolvedVisual:
-    fallback = ResolvedVisual(placeholder=attachment.placeholder)
-    if not attachment.file_id:
-        return fallback
+    unavailable = ResolvedVisual(
+        placeholder=_append_visual_notice(
+            attachment.placeholder,
+            "无法获取视觉内容"
+        )
+    )
 
     try:
-        # 1. 调用 OneBot 标准接口获取图片信息
-        img_info = await bot.get_image(file=attachment.file_id)
-        file_path_str = img_info.get("file", "")
-
+        # 1. 优先通过 get_image() 获取最终路径，失败时使用消息段自带的 path。
+        file_path_str = ""
+        if attachment.file_id:
+            try:
+                img_info = await bot.get_image(file=attachment.file_id)
+                if isinstance(img_info, dict):
+                    file_path_str = str(img_info.get("file") or "").strip()
+            except Exception as e:
+                logger.warning(
+                    f"[AI Chat] get_image 获取视觉附件路径失败，将尝试消息 path: {e}"
+                )
+        file_path_str = file_path_str or attachment.local_path
         if not file_path_str:
-            return fallback
+            logger.warning(
+                f"[AI Chat] 视觉附件没有可用文件路径，标签: "
+                f"{attachment.placeholder}"
+            )
+            return unavailable
 
-        # 2. 路径策略判断：自动 vs 手动覆盖
+        # 2. 路径策略判断：自动 vs 手动覆盖。
         raw_path = Path(file_path_str)
         if IMAGE_BASE_DIR:
             # 【手动模式】遇到了 Docker 隔离，直接提取图片文件名(raw_path.name)，拼接到配置的映射目录下
@@ -1009,19 +1052,7 @@ async def resolve_visual_attachment(
             # 【自动模式】留空则完全信任 NapCat 返回的底层绝对路径
             file_path = raw_path
 
-        # 3. 直接信任 NapCat 最终落地文件的后缀，不额外读取文件头。
-        suffix = file_path.suffix.lower()
-        mime_type = SUPPORTED_IMAGE_MIME_TYPES.get(suffix)
-        if not mime_type:
-            format_name = suffix.removeprefix(".").upper() or "未知"
-            return ResolvedVisual(
-                placeholder=_unsupported_visual_placeholder(
-                    attachment.placeholder,
-                    format_name
-                )
-            )
-
-        # 4. 轮询等待文件落地，确保文件大小大于 0 字节
+        # 3. 轮询等待文件落地，确保文件大小大于 0 字节。
         for _ in range(max_retries):
             if file_path.exists() and file_path.is_file() and file_path.stat().st_size > 0:
                 break
@@ -1030,11 +1061,31 @@ async def resolve_visual_attachment(
             logger.warning(
                 f"[AI Chat] 等待本地图片落地超时，预期路径: {file_path}"
             )
-            return fallback
+            return unavailable
 
-        # 5. 使用线程池读取文件
-        loop = asyncio.get_event_loop()
+        # 4. 在线程池读取文件头，以真实内容识别格式，不依赖文件名或后缀。
+        loop = asyncio.get_running_loop()
 
+        def read_header():
+            with file_path.open("rb") as image_file:
+                return image_file.read(64)
+
+        header = await loop.run_in_executor(None, read_header)
+        format_name, mime_type = _detect_image_format(header)
+        if not mime_type:
+            reason = (
+                f"暂不支持 {format_name} 格式"
+                if format_name
+                else "无法识别图片格式"
+            )
+            return ResolvedVisual(
+                placeholder=_append_visual_notice(
+                    attachment.placeholder,
+                    reason
+                )
+            )
+
+        # 5. 已确认是支持格式，再读取完整文件并转换为 Base64。
         def read_file():
             return base64.b64encode(file_path.read_bytes()).decode('utf-8')
 
@@ -1047,7 +1098,7 @@ async def resolve_visual_attachment(
 
     except Exception as e:
         logger.exception(f"[AI Chat] 读取本地图片转Base64失败: {e}")
-    return fallback
+    return unavailable
 
 
 # ========== 辅助函数：专供 AI 理解的富文本与视觉附件提取 ==========
@@ -1651,12 +1702,10 @@ class ChatService:
             bot: Bot,
             visual_attachments: list[VisualAttachment]
     ) -> list[ResolvedVisual]:
-        resolved_visuals = []
-        for attachment in visual_attachments:
-            resolved_visuals.append(
-                await resolve_visual_attachment(bot, attachment)
-            )
-        return resolved_visuals
+        return await asyncio.gather(*(
+            resolve_visual_attachment(bot, attachment)
+            for attachment in visual_attachments
+        ))
 
     @staticmethod
     def apply_visual_placeholders(
@@ -1731,11 +1780,9 @@ class ChatService:
 
         if selection.vision_enabled and model_visuals:
             system_prompt += (
-                "\n[系统重要提示：用户本次提问附带了视觉附件。"
-                "请结合视觉能力回答上述问题。文本中的视觉占位原样取自 QQ 消息的"
-                "图片 summary；没有 summary 时才使用 [图片]。附件只对应未标注"
-                "“未发送”的占位，并按它们在当前提问中的出现顺序排列。"
-                "这些附件是用户当下的提问内容，绝不是历史聊天记录中的杂图！]"
+                "\n[系统重要提示：用户本次提问附带了视觉内容。视觉附件按它们在"
+                "当前提问（包括一层引用）中的出现顺序排列；请结合实际视觉内容"
+                "回答。这些附件只属于当前提问，不来自历史聊天记录。]"
             )
 
         return system_prompt, final_prompt, rows

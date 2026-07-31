@@ -27,6 +27,101 @@
 
 ## 2. 一分钟理解整体架构
 
+### 2.1 原文件从头到尾的架构树
+
+```text
+easy_ai.py
+│
+├─ 导入、配置、提示词与全局状态
+│  ├─ 基础配置 / 第三方搜索配置 / MODELS_CONFIG
+│  ├─ SERIOUS_SYSTEM_PROMPT / CASUAL_SYSTEM_PROMPT / MODE_PROMPTS
+│  └─ _bot_nickname
+│
+├─ 结构化领域对象
+│  ├─ VisualAttachment / ParsedMessage / ResolvedVisual
+│  │  └─ ResolvedVisual.sendable
+│  ├─ _visual_placeholder_token()
+│  ├─ SearchResult / ModelReply / ModelSelection
+│  │  ├─ SearchResult.prefix_value()
+│  │  ├─ ModelSelection.api_type / api_url
+│  │  ├─ ModelSelection.vision_enabled / search_enabled
+│  │  └─ ModelSelection.use_third_search / information
+│  ├─ PreparedModelRequest / ChatCompletion
+│  └─ UnsupportedAPITypeError / ModelHTTPError
+│
+├─ API 回包与 OpenAI 原生搜索适配
+│  ├─ _get_openai_message()
+│  ├─ _extract_api_reply_text()
+│  ├─ _enable_openai_native_search()
+│  └─ _parse_openai_native_search_response()
+│
+├─ Driver、HTTP 生命周期、配置检查与数据库初始化
+│  ├─ driver / _http_session
+│  ├─ init_http_session() / close_http_session() / get_http_session()
+│  ├─ validate_configuration()
+│  └─ init_db()
+│
+├─ 动态历史条数
+│  └─ get_dynamic_history_length()
+│
+├─ OneBotMessageParser
+│  ├─ __init__()
+│  ├─ _segment_type_and_data()
+│  ├─ _image_placeholder() / _image_file_id() / _render_ai_image()
+│  ├─ _format_member_at()
+│  ├─ _render_storage_segment()
+│  ├─ _render_quoted_ai_segment() / _render_ai_reply()
+│  ├─ _render_ai_segment()
+│  └─ parse()
+│
+├─ 数据库存储、QQ 发送与写库
+│  ├─ parse_message_content()
+│  ├─ send_and_save()
+│  └─ insert_message_to_db()
+│
+├─ 视觉附件与 AI 富文本
+│  ├─ _append_visual_notice()
+│  ├─ _detect_image_format()
+│  ├─ resolve_visual_attachment()
+│  │  ├─ read_header()
+│  │  └─ read_file()
+│  └─ extract_ai_content()
+│
+├─ 第三方博查搜索
+│  ├─ THIRD_SEARCH_FRESHNESS_VALUES / _is_valid_search_freshness()
+│  ├─ THIRD_SEARCH_TOOL
+│  ├─ bocha_search()
+│  │  └─ clean_text()
+│  ├─ _execute_web_search()
+│  └─ _run_openai_third_search_workflow()
+│
+├─ 历史读取、格式化与回复头
+│  ├─ _load_history_rows()
+│  ├─ _load_user_display_map()
+│  ├─ _format_history_text()
+│  │  ├─ convert_reply_time()
+│  │  └─ convert_at()
+│  └─ _format_reply_prefix()
+│
+├─ ChatService
+│  ├─ select_model()
+│  ├─ resolve_visuals() / apply_visual_placeholders()
+│  ├─ build_prompts()
+│  ├─ build_model_request()
+│  ├─ parse_gemini_reply()
+│  ├─ send_model_request()
+│  └─ complete()
+│
+├─ chat_service 实例
+│
+└─ NoneBot 生命周期与事件入口
+   ├─ sync_history_on_startup()
+   ├─ record_handler → record_chat_history()
+   └─ chat_handler → handle_ai_chat()
+```
+
+### 2.2 Bot 调用流程树
+
 ```text
 NoneBot / OneBot 事件
 │
@@ -72,18 +167,101 @@ NoneBot / OneBot 事件
       └─ send_and_save()
 ```
 
-单文件内部可以理解为六层：
+### 2.3 可跳转的源码顺序导航
+
+以下顺序与 `easy_ai.py` 一致；函数、方法和属性名称均可点击跳到详细说明。
+
+- 导入、配置与提示词
+  - 导入 `aiohttp`、`aiosqlite`、NoneBot/OneBot、数据类、路径、编码、时间、正则和异步工具。
+  - [基础、第三方搜索与模型配置](#configuration)决定白名单、数据库、超时、模式、视觉和搜索能力。
+  - [系统提示词与全局机器人昵称](#prompts-and-global-state)提供严肃/随性约束和运行时身份。
+- 结构化领域对象
+  - [`VisualAttachment`](#class-visual-attachment)保存图片标签及候选文件来源。
+  - [`ParsedMessage`](#class-parsed-message)统一返回文本和视觉附件。
+  - [`ResolvedVisual`](#class-resolved-visual)保存格式判断结果；[`sendable`](#prop-resolved-visual-sendable)判断能否发送。
+  - [`_visual_placeholder_token()`](#fn-visual-placeholder-token)保留视觉附件在富文本中的原位置。
+  - [`SearchResult`](#class-search-result)统一搜索状态；[`prefix_value()`](#method-search-result-prefix-value)生成回复头字段。
+  - [`ModelReply`](#class-model-reply)组合模型正文和搜索状态。
+  - [`ModelSelection`](#class-model-selection)保存模型选择，并通过 [`api_type`](#prop-model-selection-api-type)、[`api_url`](#prop-model-selection-api-url)、[`vision_enabled`](#prop-model-selection-vision-enabled)、[`search_enabled`](#prop-model-selection-search-enabled)、[`use_third_search`](#prop-model-selection-use-third-search) 和 [`information`](#prop-model-selection-information) 暴露运行时决策。
+  - [`PreparedModelRequest`](#class-prepared-model-request)保存已组装的协议请求。
+  - [`ChatCompletion`](#class-chat-completion)把正文、历史数和图片数交给事件层。
+  - [`UnsupportedAPITypeError`](#exception-unsupported-api-type)与 [`ModelHTTPError`](#exception-model-http)区分配置错误和首轮 HTTP 错误。
+- API 回包与 OpenAI 原生搜索适配
+  - [`_get_openai_message()`](#fn-get-openai-message)取得第一条 OpenAI message。
+  - [`_extract_api_reply_text()`](#fn-extract-api-reply-text)统一提取 OpenAI/Gemini 正文。
+  - [`_enable_openai_native_search()`](#fn-enable-openai-native-search)按模型特征写入联网参数。
+  - [`_parse_openai_native_search_response()`](#fn-parse-openai-native-search-response)从回包证据统计搜索。
+- Driver、HTTP 生命周期、配置检查与数据库初始化
+  - [`driver`](#driver)注册生命周期钩子；[`_http_session`](#http-session)保存共享会话。
+  - [`init_http_session()`](#fn-init-http-session)启动时建会话；[`close_http_session()`](#fn-close-http-session)关闭会话；[`get_http_session()`](#fn-get-http-session)提供惰性兜底。
+  - [`validate_configuration()`](#fn-validate-configuration)非阻断地报告配置问题。
+  - [`init_db()`](#fn-init-db)设置 WAL 并创建用户表和白名单群表。
+- 动态历史条数
+  - [`get_dynamic_history_length()`](#fn-get-dynamic-history-length)按消息密度算法或前置模型决定 50～500 条历史。
+- OneBot 消息解析
+  - [`OneBotMessageParser`](#class-onebot-message-parser)统一数据库文本和 AI 富文本两条解析分支。
+    - [`__init__()`](#method-parser-init)保存 Bot 与群号上下文。
+    - [`_segment_type_and_data()`](#method-parser-segment-type-and-data)兼容字典和 `MessageSegment`。
+    - [`_image_placeholder()`](#method-parser-image-placeholder)取得任意 `summary` 标签。
+    - [`_image_file_id()`](#method-parser-image-file-id)选择 `get_image()` 文件标识。
+    - [`_render_ai_image()`](#method-parser-render-ai-image)登记视觉附件并写入内部位置标记。
+    - [`_format_member_at()`](#method-parser-format-member-at)把 QQ ID 转成可读 `@`。
+    - [`_render_storage_segment()`](#method-parser-render-storage-segment)渲染数据库单段。
+    - [`_render_quoted_ai_segment()`](#method-parser-render-quoted-ai-segment)渲染一层引用内部单段。
+    - [`_render_ai_reply()`](#method-parser-render-ai-reply)获取并展开外层引用一次。
+    - [`_render_ai_segment()`](#method-parser-render-ai-segment)渲染当前提问单段。
+    - [`parse()`](#method-parser-parse)遍历消息并返回 `ParsedMessage`。
+  - [`parse_message_content()`](#fn-parse-message-content)提供数据库存储兼容入口。
+- QQ 发送与数据库写入
+  - [`send_and_save()`](#fn-send-and-save)发送、按需重试、保存机器人消息并结束 Handler。
+  - [`insert_message_to_db()`](#fn-insert-message-to-db)在一个事务内写消息和两类用户资料。
+- 视觉附件与 AI 富文本
+  - [`_append_visual_notice()`](#fn-append-visual-notice)把未发送原因写回原标签。
+  - [`_detect_image_format()`](#fn-detect-image-format)按文件头识别格式和可用 MIME。
+  - [`resolve_visual_attachment()`](#fn-resolve-visual-attachment)取得路径、等待落地、识别格式并按需编码；内部 [`read_header()`](#local-read-header)只读文件头，[`read_file()`](#local-read-file)读取完整文件并转 Base64。
+  - [`extract_ai_content()`](#fn-extract-ai-content)提供 AI 富文本与视觉附件兼容入口。
+- 第三方博查搜索
+  - [`THIRD_SEARCH_FRESHNESS_VALUES`](#third-search-freshness-values)列出预设时间范围；[`_is_valid_search_freshness()`](#fn-is-valid-search-freshness)同时校验单日和日期范围。
+  - [`THIRD_SEARCH_TOOL`](#third-search-tool)定义模型可调用的 `web_search` 工具。
+  - [`bocha_search()`](#fn-bocha-search)调用并格式化博查结果；内部 [`clean_text()`](#local-clean-text)清理可选文本字段。
+  - [`_execute_web_search()`](#fn-execute-web-search)校验并执行一批工具调用。
+  - [`_run_openai_third_search_workflow()`](#fn-run-openai-third-search-workflow)管理多轮搜索和最后强制回答。
+- 历史读取与回复头
+  - [`_load_history_rows()`](#fn-load-history-rows)查询、排除当前消息并恢复旧到新顺序。
+  - [`_load_user_display_map()`](#fn-load-user-display-map)生成群名片/QQ 昵称映射。
+  - [`_format_history_text()`](#fn-format-history-text)格式化历史；内部 [`convert_reply_time()`](#local-convert-reply-time)处理引用，[`convert_at()`](#local-convert-at)处理数字 `@`。
+  - [`_format_reply_prefix()`](#fn-format-reply-prefix)生成固定正式回复头。
+- `ChatService` 业务编排
+  - [`select_model()`](#method-chat-service-select-model)解析模型前缀和模式。
+  - [`resolve_visuals()`](#method-chat-service-resolve-visuals)并行解析图片。
+  - [`apply_visual_placeholders()`](#method-chat-service-apply-visual-placeholders)把格式结果放回原位置。
+  - [`build_prompts()`](#method-chat-service-build-prompts)准备身份、历史和提示词。
+  - [`build_model_request()`](#method-chat-service-build-model-request)组装 OpenAI/Gemini 请求。
+  - [`parse_gemini_reply()`](#method-chat-service-parse-gemini-reply)解析 Gemini 正文和 grounding 证据。
+  - [`send_model_request()`](#method-chat-service-send-model-request)发送首轮并按协议/搜索方式分流。
+  - [`complete()`](#method-chat-service-complete)串联一次正式 AI 调用并返回 `ChatCompletion`。
+  - [`chat_service`](#chat-service-instance)是事件层复用的服务实例。
+- NoneBot 生命周期与事件入口
+  - [`sync_history_on_startup()`](#fn-sync-history-on-startup)在 Bot 连接后同步白名单群历史。
+  - [`record_handler`](#record-handler)注册被动记录器；[`record_chat_history()`](#fn-record-chat-history)保存普通群消息。
+  - [`chat_handler`](#chat-handler)注册 `@机器人` 处理器；[`handle_ai_chat()`](#fn-handle-ai-chat)完成入口校验、业务调用、回复和异常分流。
+
+### 2.4 六层职责
 
 | 层 | 主要对象 | 职责 |
 |---|---|---|
-| 配置层 | 全局配置、提示词、`MODELS_CONFIG` | 决定白名单、模型、超时、视觉与搜索能力 |
-| 领域对象层 | `ParsedMessage`、`SearchResult`、`ModelReply` 等 | 用明确对象传递结果，减少 `bool/int/dict` 混用 |
-| 基础设施层 | HTTP 会话、SQLite、OneBot API | 管理外部资源和持久化 |
-| 解析/协议层 | `OneBotMessageParser`、搜索解析函数 | 适配消息段和不同上游回包 |
-| 业务编排层 | `ChatService` | 组织图片、历史、提示词、请求和模型回复 |
-| 事件入口层 | 三个 Handler | 响应框架事件、校验、发送和结束事件 |
+| 配置层 | [全局配置、提示词、`MODELS_CONFIG`](#configuration) | 决定白名单、模型、超时、视觉与搜索能力 |
+| 领域对象层 | [`ParsedMessage`](#class-parsed-message)、[`SearchResult`](#class-search-result)、[`ModelReply`](#class-model-reply) 等 | 用明确对象传递结果，减少 `bool/int/dict` 混用 |
+| 基础设施层 | [HTTP 会话](#http-session)、[SQLite](#database-design)、OneBot API | 管理外部资源和持久化 |
+| 解析/协议层 | [`OneBotMessageParser`](#class-onebot-message-parser)、[搜索解析函数](#fn-parse-openai-native-search-response) | 适配消息段和不同上游回包 |
+| 业务编排层 | [`ChatService`](#class-chat-service) | 组织图片、历史、提示词、请求和模型回复 |
+| 事件入口层 | [三个 Handler/钩子](#nonebot-events) | 响应框架事件、校验、发送和结束事件 |
 
-## 3. 配置区域
+<a id="configuration"></a>
+
+## 3. 配置、提示词与全局状态
+
+<a id="basic-configuration"></a>
 
 ### 3.1 基础配置
 
@@ -98,6 +276,8 @@ NoneBot / OneBot 事件
 | `AI_CHAT_TIMEOUT` | 正式模型与第三方搜索后续模型轮次的超时 | `aiohttp` 超时会被主 Handler 单独处理 |
 | `IMAGE_BASE_DIR` | NapCat 图片目录映射 | 留空信任 NapCat 绝对路径；非空时只取文件名再拼接 |
 | `DEFAULT_MODE` | 无模型前缀时的模式 | 必须是 `serious` 或 `casual` |
+
+<a id="third-search-configuration"></a>
 
 ### 3.2 第三方搜索配置
 
@@ -120,6 +300,8 @@ AND MAX_SEARCH_ROUNDS > 0
 ```
 
 模型原生搜索优先于第三方搜索，两者不会同时注册。
+
+<a id="models-config"></a>
 
 ### 3.3 `MODELS_CONFIG` 字段
 
@@ -145,7 +327,9 @@ AND MAX_SEARCH_ROUNDS > 0
 - C 的显示名称为 `gemini-3.1-pro`，实际模型 ID 为
   `gemini-3.1-pro-preview`。
 
-### 3.4 提示词
+<a id="prompts-and-global-state"></a>
+
+### 3.4 提示词与全局状态
 
 - `SERIOUS_SYSTEM_PROMPT`：强调客观、禁止猜测、具备联网能力时优先搜索。
 - `CASUAL_SYSTEM_PROMPT`：允许轻松语气，但不塑造独立人设。
@@ -153,18 +337,15 @@ AND MAX_SEARCH_ROUNDS > 0
 - `{bot_identity}` 在运行时替换为机器人群名片和 QQ 昵称。
 - `MODE_PROMPTS` 负责从模式名映射到提示词。
 
+`_bot_nickname` 初始为 `AI助手`，Bot 连接后由 `sync_history_on_startup()` 尝试更新；群内身份组装失败时仍以它回退。
+
+<a id="domain-objects"></a>
+
 ## 4. 领域对象与异常类型
 
-### 4.1 `ParsedMessage`
+<a id="class-visual-attachment"></a>
 
-OneBot 消息解析结果：
-
-- `text`：数据库存储文本或 AI 富文本。
-- `visual_attachments`：需要进一步判断格式的视觉附件。
-
-数据库解析通常只使用 `text`；AI 解析同时使用二者。
-
-### 4.2 `VisualAttachment` 与 `ResolvedVisual`
+### 4.1 `VisualAttachment`
 
 `VisualAttachment` 保留 OneBot `image` 段的必要信息：
 
@@ -173,14 +354,40 @@ OneBot 消息解析结果：
 - `file_id`：优先供 `get_image()` 查询最终本地文件。
 - `local_path`：消息段自带的 `path`，在 `get_image()` 无法提供路径时回退使用。
 
+<a id="class-parsed-message"></a>
+
+### 4.2 `ParsedMessage`
+
+OneBot 消息解析结果：
+
+- `text`：数据库存储文本或 AI 富文本。
+- `visual_attachments`：需要进一步判断格式的视觉附件。
+
+数据库解析通常只使用 `text`；AI 解析同时使用二者。
+
+<a id="class-resolved-visual"></a>
+
+### 4.3 `ResolvedVisual`
+
 `ResolvedVisual` 表示完成本地路径和文件头判断后的视觉附件：
 
 - `placeholder`：最终放入 AI 文本的原标签或未发送原因。
 - `mime_type`：支持格式对应的 MIME；不发送时为 `None`。
 - `base64_data`：成功读取后的图片数据；不发送时为 `None`。
+
+<a id="prop-resolved-visual-sendable"></a>
+
 - `sendable`：同时具有 MIME 和 Base64 数据时为真。
 
-### 4.3 `SearchResult`
+<a id="fn-visual-placeholder-token"></a>
+
+### 4.4 `_visual_placeholder_token()`
+
+按附件索引生成只在富文本组装阶段使用的内部标记。它保留图片在原消息中的位置，随后由 `ChatService.apply_visual_placeholders()` 替换，不会进入最终提示词。
+
+<a id="class-search-result"></a>
+
+### 4.5 `SearchResult`
 
 统一表达一次回复的搜索状态：
 
@@ -188,6 +395,8 @@ OneBot 消息解析结果：
 |---|---|
 | `performed` | `True`=确认发生；`False`=确认未发生；`None`=中转没有提供可核实信息 |
 | `count` | 可核实的搜索/来源/工具数量 |
+
+<a id="method-search-result-prefix-value"></a>
 
 `prefix_value()` 将内部状态转换成回复头：
 
@@ -197,18 +406,29 @@ OneBot 消息解析结果：
 
 因此，“已开启搜索”不等于真的发生了搜索；程序只显示可核实的正数，或搜索实际调用后所有轮次均未取得结果的状态。某一轮失败不会覆盖其他轮已经取得的结果数。
 
-### 4.4 `ModelReply`
+<a id="class-model-reply"></a>
+
+### 4.6 `ModelReply`
 
 - `text`：模型最终正文。
 - `search`：对应的 `SearchResult`。
 
-### 4.5 `ModelSelection`
+<a id="class-model-selection"></a>
+
+### 4.7 `ModelSelection`
 
 保存一次用户消息的模型选择：
 
 - `mode`：`serious` 或 `casual`。
 - `prefix_to_remove`：需要从 AI 富文本中去掉的 `/A`、`/a` 等前缀。
 - `config`：模型配置字典。
+
+<a id="prop-model-selection-api-type"></a>
+<a id="prop-model-selection-api-url"></a>
+<a id="prop-model-selection-vision-enabled"></a>
+<a id="prop-model-selection-search-enabled"></a>
+<a id="prop-model-selection-use-third-search"></a>
+<a id="prop-model-selection-information"></a>
 
 属性说明：
 
@@ -218,7 +438,9 @@ OneBot 消息解析结果：
 - `use_third_search`：集中判断第三方搜索的四个必要条件。
 - `information`：生成快速回复使用的 `模型名，SER/CAS`。
 
-### 4.6 `PreparedModelRequest`
+<a id="class-prepared-model-request"></a>
+
+### 4.8 `PreparedModelRequest`
 
 表示已组装完、可直接发送的请求：
 
@@ -227,7 +449,9 @@ OneBot 消息解析结果：
 - 原生搜索需要保留：`native_search_adapter`。
 - `use_third_search` 表示发送首轮后是否进入工具调用工作流。
 
-### 4.7 `ChatCompletion`
+<a id="class-chat-completion"></a>
+
+### 4.9 `ChatCompletion`
 
 交回 Handler 的完整结果：
 
@@ -235,36 +459,135 @@ OneBot 消息解析结果：
 - `history_count`：实际传入提示词的历史消息行数。
 - `image_count`：成功读取并实际发给模型的图片数。
 
-### 4.8 自定义异常
+<a id="custom-exceptions"></a>
+
+### 4.10 自定义异常
+
+<a id="exception-unsupported-api-type"></a>
+<a id="exception-model-http"></a>
 
 - `UnsupportedAPITypeError`：模型 `api_type` 不是 `openai` 或 `gemini`。
 - `ModelHTTPError`：正式模型首轮请求返回非 200。
 
 使用自定义异常后，Handler 可以给用户展示不同错误文案，而不必解析字符串。
 
-## 5. HTTP 生命周期与启动检查
+<a id="api-response-and-native-search"></a>
 
-### 5.1 `driver`
+## 5. API 正文与 OpenAI 原生搜索
+
+<a id="fn-get-openai-message"></a>
+
+### 5.1 `_get_openai_message()`
+
+按标准 OpenAI 兼容响应取得：
+
+```text
+data.choices[0].message
+```
+
+字段缺失、列表为空或首项不是对象时通常返回空字典。这里默认服务器遵守标准
+响应结构；若服务器以 HTTP 200 返回严重畸形的 `choices` 类型，异常会交给主
+Handler 的通用错误边界处理，不额外兼容这种服务端错误。Gemini 的
+`candidates` 采用相同原则。
+
+<a id="fn-extract-api-reply-text"></a>
+
+### 5.2 `_extract_api_reply_text()`
+
+- OpenAI：读取第一条 `message.content`，必须是字符串。
+- Gemini：读取第一条 candidate 的 `content.parts`，从后向前寻找最后一个非空 `text`。
+- 数据格式不合法或无正文时返回空字符串。
+
+`ChatService.complete()` 会把最终空正文替换成 `（模型API拒绝回复）`。
+
+<a id="fn-enable-openai-native-search"></a>
+
+### 5.3 `_enable_openai_native_search()`
+
+该函数只负责修改 OpenAI 兼容请求，并返回“适配器标识”：
+
+| `model_id` 特征 | 请求参数 | 适配器 |
+|---|---|---|
+| 包含 `glm` | 带 `enable=True` 的 `web_search` 工具 | `glm_web_search` |
+| 包含 `moonshot` | `$web_search` 内置函数 | `moonshot_web_search` |
+| 其他 | `web_search=True, network=True` | `generic_search` |
+
+以后适配新 OpenAI 兼容中转时，应优先在此扩展请求格式，不要在 `handle_ai_chat()` 增加模型判断。
+
+<a id="fn-parse-openai-native-search-response"></a>
+
+### 5.4 `_parse_openai_native_search_response()`
+
+该函数统一解析 OpenAI 兼容回包中的搜索证据，优先级如下：
+
+1. OpenAI `message.tool_calls` 数量。
+2. `server_side_tool_usage` 中键名包含 `SEARCH` 的整数合计。
+3. `num_server_side_tools_used`。
+4. `num_sources_used`。
+5. `citations` 或 `sources` 列表长度。
+
+如果搜索已启用，但中转没有返回任何可核实字段，则构造：
+
+```text
+performed=None, count=None
+```
+
+最终回复头不显示搜索字段。
+
+<a id="native-search-tradeoffs"></a>
+
+### 5.5 原生搜索适配的取舍
+
+不同中转站对同一模型可能要求完全不同的请求字段，用户也难以理解手工 `api_type` 或搜索适配器名称。当前仍采用配置加 `model_id` 特征判断，尚未实现自动试探。
+
+若以后实现自动探测，应考虑：
+
+- 只在何种错误码或回包特征下重试。
+- 如何避免一次用户提问产生多个计费请求。
+- 探测结果是否按模型/端点缓存。
+- OpenAI 与 Gemini 请求能否安全互试。
+- 原生搜索不生效但请求成功时如何识别。
+- 如何避免把正常“没有搜”误判为“不支持搜索”。
+
+这部分应单独设计，不应直接在主 Handler 中堆叠重试。
+
+<a id="runtime-and-database-init"></a>
+
+## 6. HTTP 生命周期、启动检查与数据库初始化
+
+<a id="driver"></a>
+
+### 6.1 `driver`
 
 `driver = get_driver()` 获取 NoneBot Driver，用于注册启动、关闭和 Bot 连接钩子。
 
-### 5.2 `_http_session`
+<a id="http-session"></a>
+
+### 6.2 `_http_session`
 
 插件级共享 `aiohttp.ClientSession`。模型请求、动态历史模型和博查搜索共用该会话，避免每次请求都建立并销毁连接池。
 
-### 5.3 `init_http_session()`
+<a id="fn-init-http-session"></a>
+
+### 6.3 `init_http_session()`
 
 NoneBot 启动时创建共享会话。只有会话不存在或已关闭时才新建。
 
-### 5.4 `close_http_session()`
+<a id="fn-close-http-session"></a>
+
+### 6.4 `close_http_session()`
 
 NoneBot 关闭时关闭共享会话，并把全局变量恢复为 `None`，避免未关闭会话警告和连接泄漏。
 
-### 5.5 `get_http_session()`
+<a id="fn-get-http-session"></a>
+
+### 6.5 `get_http_session()`
 
 返回共享会话。若启动钩子尚未执行或会话意外关闭，会惰性创建一个新会话，以兼容特殊插件加载顺序。
 
-### 5.6 `validate_configuration()`
+<a id="fn-validate-configuration"></a>
+
+### 6.6 `validate_configuration()`
 
 启动时检查：
 
@@ -276,9 +599,9 @@ NoneBot 关闭时关闭共享会话，并把全局变量恢复为 `None`，避�
 
 该函数只写日志，不修改配置，也不阻止启动，保持原有容错方式。
 
-## 6. 数据库架构与不变量
+<a id="database-design"></a>
 
-### 6.1 数据库设计
+### 6.7 数据库设计
 
 启动时开启：
 
@@ -320,7 +643,9 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 表名只来自配置中的群号或已通过白名单的事件群号，不接受用户消息直接提供任意表名。
 
-### 6.2 `init_db()`
+<a id="fn-init-db"></a>
+
+### 6.8 `init_db()`
 
 启动时：
 
@@ -333,208 +658,13 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 `CREATE TABLE IF NOT EXISTS` 不会清空已有数据。
 
-### 6.3 `insert_message_to_db()`
+<a id="dynamic-history"></a>
 
-入口条件：
+## 7. 动态历史记录长度
 
-- `content` 为空则不写。
-- `group_id` 不在白名单则不写。
+<a id="fn-get-dynamic-history-length"></a>
 
-同一数据库连接、同一事务内严格依次执行：
-
-1. `INSERT OR IGNORE` 写群消息表。相同 `message_id` 不重复插入。
-2. `user_info` 使用 UPSERT 更新 QQ 昵称和全局最后发言时间。
-3. `user_group_info` 使用 UPSERT 更新群名片和群内最后发言时间。
-4. `commit()`。
-
-即使第 1 步因重复消息被 `IGNORE`，后两步用户资料更新仍会继续执行。
-
-异常被记录后不向上抛出，避免一次存库失败中断消息处理。
-
-### 6.4 数据写入入口
-
-| 场景 | 入口 | 规则 |
-|---|---|---|
-| Bot 连接后的历史同步 | `sync_history_on_startup()` | 每条历史分别解析和插入 |
-| 普通白名单群消息 | `record_chat_history()` | 跳过 `@机器人`，防止与 AI Handler 竞争 |
-| 触发 AI 的用户消息 | `handle_ai_chat()` | 在任何模型调用前先强制保存 |
-| `Waiting……` 快速回复 | `send_and_save()` | 发送成功且获得 `message_id` 才保存 |
-| 正式回复或错误提示 | `send_and_save()` | 同上 |
-
-### 6.5 `_load_history_rows()`
-
-读取当前群的历史：
-
-1. 连接群消息表。
-2. 左连接全局昵称和本群名片。
-3. 排除当前触发消息的 `message_id`。
-4. 按 `timestamp DESC, rowid DESC` 获取最近 `dynamic_limit` 条。
-5. 查询结束后 `reverse()`，恢复成从旧到新的提示词顺序。
-
-排除当前触发消息很重要：该消息已经提前存库，但会在提示词最后作为“当前问题”单独加入，不能在历史中重复出现。
-
-当前消息表没有为 `timestamp` 建立额外索引，因此 `LIMIT` 只限制返回条数，并不保证
-查询耗时与表内总记录数无关。表达到百万条后，排序和筛选仍可能受总数据量、磁盘、
-SQLite 缓存及机器性能影响；代码没有承诺固定耗时。
-
-### 6.6 `_load_user_display_map()`
-
-读取当前群用户的显示名映射：
-
-- 群名片与 QQ 昵称不同：`群名片（QQ昵称：QQ昵称）`。
-- 两者相同：只显示一个名称。
-- 缺少群名片时依次回退 QQ 昵称、用户 ID。
-
-该映射用于把历史消息中的数字 `@` 和引用发言人 ID 转换成可读名称。
-
-### 6.7 数据库未改动的核查结论
-
-当前数据库相关代码实际使用 10 个 SQL 模板：
-
-- 1 条 WAL。
-- 3 条建表语句。
-- 1 条近期时间戳查询。
-- 3 条消息/用户写入语句。
-- 2 条历史与昵称查询。
-
-本次视觉附件修改没有改动这些 SQL。事务顺序、白名单判断、去重规则、查询排序、
-当前消息排除和保存入口也没有变化。
-
-后续若修改数据库相关代码，应至少复核本章列出的不变量。
-
-## 7. OneBot 消息解析
-
-### 7.1 为什么有两种解析模式
-
-同一条 OneBot 消息有两个用途：
-
-1. 数据库存储：文本应稳定、简洁，引用只保存元信息，不能把大量媒体内容写入数据库。
-2. 当前 AI 提问：需要更丰富的引用内容、可读昵称和视觉附件来源。
-
-`OneBotMessageParser` 统一遍历消息段，但使用两个渲染分支：
-
-- `for_ai=False` → `_render_storage_segment()`。
-- `for_ai=True` → `_render_ai_segment()`。
-
-### 7.2 `_segment_type_and_data()`
-
-兼容两种消息段表示：
-
-- 普通字典：读取 `segment["type"]` 和 `segment["data"]`。
-- OneBot `MessageSegment` 对象：读取 `.type` 和 `.data`。
-
-如果 `data` 不是字典，统一回退为空字典。空 `seg_type` 被视为畸形段并跳过；未知但非空类型必须保留占位符。
-
-### 7.3 `_format_member_at()`
-
-把 QQ ID 转成可读 `@`：
-
-- `all` → `[@全体成员]`。
-- 非数字 → 原样 `[@值]`。
-- 数字 → 调用 `get_group_member_info()`。
-- 有不同的群名片和 QQ 昵称 → `[@群名片（QQ昵称：昵称）]`。
-- 查询失败 → `[@QQ号]`。
-
-### 7.4 消息段行为对照
-
-| 段类型 | 数据库存储 | 当前 AI 消息 | AI 引用内容 |
-|---|---|---|---|
-| `text` | 原文本 | 原文本 | 原文本 |
-| `at` 机器人自己 | `[@机器人ID]` | 删除，避免把触发动作当问题 | 按普通成员格式化 |
-| `at` 其他成员 | `[@QQ号]` | 尽量解析昵称 | 尽量解析昵称 |
-| `at all` | `[@全体成员]` | `[@全体成员]` | `[@全体成员]` |
-| `image` 有 `summary` | 去除首尾空白后保存摘要 | 以同一摘要为标签登记视觉附件，随后按可用路径和文件头处理 | 同当前 AI 消息 |
-| `image` 无 `summary` | `[图片]` | 以 `[图片]` 为标签登记视觉附件，随后按可用路径和文件头处理 | 同当前 AI 消息 |
-| `face/mface/bface` | 摘要或 `[表情包]` | 摘要或 `[表情包]` | 摘要或 `[表情包]` |
-| `record` | `[语音]` | `[语音]` | `[语音]` |
-| `video` | `[视频]` | `[视频]` | `[视频]` |
-| `file` | 文件名占位 | 文件名占位 | 文件名占位 |
-| `forward` | `[聊天记录]` | `[聊天记录]` | `[聊天记录]` |
-| `node` | `[合并转发节点]` | `[合并转发节点]` | `[合并转发节点]` |
-| `json/xml` | `[分享了卡片/链接]` | 同左 | 同左 |
-| `reply` | 只保存时间和发言人 ID | 取回并展开一层完整内容 | `[引用回复（未继续展开）]` |
-| 未知非空类型 | `[seg_type]` | `[seg_type]` | `[seg_type]` |
-
-文件名回退：
-
-- 数据库存储：`name → file → id → 未知文件`。
-- AI 引用：`name → file → id → 未知文件`。
-- 当前 AI 顶层文件：`name → file → 未知文件`。
-
-### 7.5 `_render_storage_segment()`
-
-将单个段转换为适合长期保存的稳定文本。
-
-引用段会调用一次 `get_msg()`，但只提取原消息的 Unix 时间戳和发言人 ID，输出：
-
-```text
-[引用回复(时间：时间戳，发言人：用户ID)]
-```
-
-此格式随后可由 `_format_history_text()` 转换成可读时间和昵称。
-
-### 7.6 `_render_quoted_ai_segment()`
-
-渲染“被引用消息内部”的单个段：
-
-- 图片始终读取 `summary` 作为标签；没有 `summary` 时使用 `[图片]`。
-- 每个 `image` 段都与当前消息共用同一个 `visual_attachments` 列表；文件标识和
-  消息段 `path` 都不可用时仍在原位置保留标签并追加未发送原因。
-- 支持格式的引用视觉附件会实际发送；格式不支持、无法识别或无法取得文件时，
-  会在原标签上追加对应的未发送原因。
-- 文件、语音、视频等保留明确占位。
-- 若引用内容里再次出现 `reply`，只输出 `[引用回复（未继续展开）]`。
-- 不调用 `_render_ai_reply()`，因此不会继续套娃或无限请求。
-- 最后的显式 `else` 保证未来新增的 OneBot 类型不会静默丢失。
-
-### 7.7 `_render_ai_reply()`
-
-只展开外层引用一次：
-
-1. 用外层引用 ID 调用一次 `bot.get_msg()`。
-2. 格式化原消息时间。
-3. 组合原发言人的群名片和 QQ 昵称。
-4. 逐段调用 `_render_quoted_ai_segment()`。
-5. 将引用图片加入当前视觉图片列表。
-6. 生成包含时间、发言人和完整内容的富文本。
-
-获取失败时返回 `[引用回复(获取信息失败)]`，而不是中断整个问题。
-
-### 7.8 `_render_ai_segment()`
-
-渲染当前用户消息的单个顶层段。主要特殊点：
-
-- 删除用户对机器人的 `at`。
-- 对其他成员的 `at` 尽量补全昵称。
-- 外层 `reply` 进入 `_render_ai_reply()`。
-- 所有图片段都以 `summary`（缺省为 `[图片]`）作为标签并加入待处理列表。
-- 优先通过文件标识调用 `get_image()`，无法取得最终路径时回退到消息段 `path`。
-- 读取真实文件头；JPEG、PNG、WebP 可以发送，识别出的其他格式在原标签上追加
-  “暂不支持该格式”的说明性文字。
-- 文件头无法识别或文件无法取得时，同样在原标签上追加对应的未发送原因。
-- 未知类型使用 `[seg_type]` 兜底。
-
-### 7.9 `parse()`
-
-解析器总入口：
-
-- 输入是普通字符串且用于数据库：把所有 CQ 码替换为 `[媒体/表情]`。
-- 输入是普通字符串且用于 AI：返回空文本；正常实时事件应传 OneBot 消息对象。
-- 输入可迭代：逐段解析并拼接。
-- 最后对整体文本 `strip()`。
-- 返回 `ParsedMessage(text, visual_attachments)`。
-
-### 7.10 两个兼容入口
-
-- `parse_message_content()`：数据库存储入口，只返回 `.text`。
-- `extract_ai_content()`：AI 富文本入口，返回 `(text, visual_attachments)` 元组。
-
-这两个函数分别向数据库流程和 AI Handler 提供简单结果，调用方无需直接操作
-`ParsedMessage`。
-
-## 8. 动态历史记录长度
-
-### 8.1 `get_dynamic_history_length()`
+### 7.1 `get_dynamic_history_length()`
 
 固定范围：
 
@@ -568,9 +698,257 @@ SQLite 缓存及机器性能影响；代码没有承诺固定耗时。
 
 前置模型只决定条数，不读取具体群聊正文。
 
-## 9. 图片处理
+<a id="class-onebot-message-parser"></a>
 
-### 9.1 `summary` 是通用标签
+## 8. OneBot 消息解析
+
+<a id="parser-two-modes"></a>
+
+### 8.1 为什么有两种解析模式
+
+同一条 OneBot 消息有两个用途：
+
+1. 数据库存储：文本应稳定、简洁，引用只保存元信息，不能把大量媒体内容写入数据库。
+2. 当前 AI 提问：需要更丰富的引用内容、可读昵称和视觉附件来源。
+
+`OneBotMessageParser` 统一遍历消息段，但使用两个渲染分支：
+
+- `for_ai=False` → `_render_storage_segment()`。
+- `for_ai=True` → `_render_ai_segment()`。
+
+<a id="method-parser-init"></a>
+
+### 8.2 `OneBotMessageParser.__init__()`
+
+保存当前 `Bot` 和群号，供成员查询、引用查询、图片路径查询及两条渲染分支复用。
+
+<a id="method-parser-segment-type-and-data"></a>
+
+### 8.3 `_segment_type_and_data()`
+
+兼容两种消息段表示：
+
+- 普通字典：读取 `segment["type"]` 和 `segment["data"]`。
+- OneBot `MessageSegment` 对象：读取 `.type` 和 `.data`。
+
+如果 `data` 不是字典，统一回退为空字典。空 `seg_type` 被视为畸形段并跳过；未知但非空类型必须保留占位符。
+
+<a id="method-parser-image-placeholder"></a>
+
+### 8.4 `_image_placeholder()`
+
+把 `image.summary` 转为字符串并去除首尾空白；结果为空时返回 `[图片]`。它不枚举或特殊处理任何具体标签。
+
+<a id="method-parser-image-file-id"></a>
+
+### 8.5 `_image_file_id()`
+
+通常优先返回消息段 `file`，为空时回退 `file_id`；当 `file == "marketface"` 且存在 `file_id` 时改用 `file_id`，供 `get_image()` 查询。
+
+<a id="method-parser-render-ai-image"></a>
+
+### 8.6 `_render_ai_image()`
+
+取得标签和文件标识，按当前附件数量生成内部位置标记，把标签、文件标识和消息段 `path` 登记为 `VisualAttachment`，最后返回该标记。此处不读取图片文件。
+
+<a id="method-parser-format-member-at"></a>
+
+### 8.7 `_format_member_at()`
+
+把 QQ ID 转成可读 `@`：
+
+- `all` → `[@全体成员]`。
+- 非数字 → 原样 `[@值]`。
+- 数字 → 调用 `get_group_member_info()`。
+- 有不同的群名片和 QQ 昵称 → `[@群名片（QQ昵称：昵称）]`。
+- 查询失败 → `[@QQ号]`。
+
+<a id="message-segment-matrix"></a>
+
+### 8.8 消息段行为对照
+
+| 段类型 | 数据库存储 | 当前 AI 消息 | AI 引用内容 |
+|---|---|---|---|
+| `text` | 原文本 | 原文本 | 原文本 |
+| `at` 机器人自己 | `[@机器人ID]` | 删除，避免把触发动作当问题 | 按普通成员格式化 |
+| `at` 其他成员 | `[@QQ号]` | 尽量解析昵称 | 尽量解析昵称 |
+| `at all` | `[@全体成员]` | `[@全体成员]` | `[@全体成员]` |
+| `image` 有 `summary` | 去除首尾空白后保存摘要 | 以同一摘要为标签登记视觉附件，随后按可用路径和文件头处理 | 同当前 AI 消息 |
+| `image` 无 `summary` | `[图片]` | 以 `[图片]` 为标签登记视觉附件，随后按可用路径和文件头处理 | 同当前 AI 消息 |
+| `face/mface/bface` | 摘要或 `[表情包]` | 摘要或 `[表情包]` | 摘要或 `[表情包]` |
+| `record` | `[语音]` | `[语音]` | `[语音]` |
+| `video` | `[视频]` | `[视频]` | `[视频]` |
+| `file` | 文件名占位 | 文件名占位 | 文件名占位 |
+| `forward` | `[聊天记录]` | `[聊天记录]` | `[聊天记录]` |
+| `node` | `[合并转发节点]` | `[合并转发节点]` | `[合并转发节点]` |
+| `json/xml` | `[分享了卡片/链接]` | 同左 | 同左 |
+| `reply` | 只保存时间和发言人 ID | 取回并展开一层完整内容 | `[引用回复（未继续展开）]` |
+| 未知非空类型 | `[seg_type]` | `[seg_type]` | `[seg_type]` |
+
+文件名回退：
+
+- 数据库存储：`name → file → id → 未知文件`。
+- AI 引用：`name → file → id → 未知文件`。
+- 当前 AI 顶层文件：`name → file → 未知文件`。
+
+<a id="method-parser-render-storage-segment"></a>
+
+### 8.9 `_render_storage_segment()`
+
+将单个段转换为适合长期保存的稳定文本。
+
+引用段会调用一次 `get_msg()`，但只提取原消息的 Unix 时间戳和发言人 ID，输出：
+
+```text
+[引用回复(时间：时间戳，发言人：用户ID)]
+```
+
+此格式随后可由 `_format_history_text()` 转换成可读时间和昵称。
+
+<a id="method-parser-render-quoted-ai-segment"></a>
+
+### 8.10 `_render_quoted_ai_segment()`
+
+渲染“被引用消息内部”的单个段：
+
+- 图片始终读取 `summary` 作为标签；没有 `summary` 时使用 `[图片]`。
+- 每个 `image` 段都与当前消息共用同一个 `visual_attachments` 列表；文件标识和
+  消息段 `path` 都不可用时仍在原位置保留标签并追加未发送原因。
+- 支持格式的引用视觉附件会实际发送；格式不支持、无法识别或无法取得文件时，
+  会在原标签上追加对应的未发送原因。
+- 文件、语音、视频等保留明确占位。
+- 若引用内容里再次出现 `reply`，只输出 `[引用回复（未继续展开）]`。
+- 不调用 `_render_ai_reply()`，因此不会继续套娃或无限请求。
+- 最后的显式 `else` 保证未来新增的 OneBot 类型不会静默丢失。
+
+<a id="method-parser-render-ai-reply"></a>
+
+### 8.11 `_render_ai_reply()`
+
+只展开外层引用一次：
+
+1. 用外层引用 ID 调用一次 `bot.get_msg()`。
+2. 格式化原消息时间。
+3. 组合原发言人的群名片和 QQ 昵称。
+4. 逐段调用 `_render_quoted_ai_segment()`。
+5. 将引用图片加入当前视觉图片列表。
+6. 生成包含时间、发言人和完整内容的富文本。
+
+获取失败时返回 `[引用回复(获取信息失败)]`，而不是中断整个问题。
+
+<a id="method-parser-render-ai-segment"></a>
+
+### 8.12 `_render_ai_segment()`
+
+渲染当前用户消息的单个顶层段。主要特殊点：
+
+- 删除用户对机器人的 `at`。
+- 对其他成员的 `at` 尽量补全昵称。
+- 外层 `reply` 进入 `_render_ai_reply()`。
+- 所有图片段都以 `summary`（缺省为 `[图片]`）作为标签并加入待处理列表。
+- 优先通过文件标识调用 `get_image()`，无法取得最终路径时回退到消息段 `path`。
+- 读取真实文件头；JPEG、PNG、WebP 可以发送，识别出的其他格式在原标签上追加
+  “暂不支持该格式”的说明性文字。
+- 文件头无法识别或文件无法取得时，同样在原标签上追加对应的未发送原因。
+- 未知类型使用 `[seg_type]` 兜底。
+
+<a id="method-parser-parse"></a>
+
+### 8.13 `parse()`
+
+解析器总入口：
+
+- 输入是普通字符串且用于数据库：把所有 CQ 码替换为 `[媒体/表情]`。
+- 输入是普通字符串且用于 AI：返回空文本；正常实时事件应传 OneBot 消息对象。
+- 输入可迭代：逐段解析并拼接。
+- 最后对整体文本 `strip()`。
+- 返回 `ParsedMessage(text, visual_attachments)`。
+
+<a id="fn-parse-message-content"></a>
+
+### 8.14 `parse_message_content()`
+
+数据库存储兼容入口，创建 `OneBotMessageParser` 并使用默认的 `for_ai=False` 解析，只返回 `ParsedMessage.text`。数据库流程无需直接操作结构化解析结果。
+
+<a id="send-and-database-write"></a>
+
+## 9. QQ 发送与数据库写入
+
+<a id="fn-send-and-save"></a>
+
+### 9.1 `send_and_save()`
+
+职责是“发送 QQ 消息 + 成功后保存机器人消息 + 可选结束 Handler”：
+
+1. 首次调用 `matcher.send()`。
+2. 发送失败写 `warning`。
+3. 正式消息 `is_finish=True` 时，间隔 1 秒最多重试 3 次。
+4. 快速回复不重试。
+5. 只有返回字典且带 `message_id` 时才尝试存库。
+6. 机器人身份优先从登录信息和群成员信息获取。
+7. 身份查询失败时回退 `AI助手` 和 `bot.self_id`。
+8. 使用数据库消息解析器规范化机器人发出的 `MessageSegment`。
+9. 调用 `insert_message_to_db()`。
+10. `is_finish=True` 时调用 `matcher.finish()`。
+
+即使所有正式发送尝试都失败，最后仍会结束当前 Handler；不会让同一事件无限挂起。
+
+<a id="fn-insert-message-to-db"></a>
+
+### 9.2 `insert_message_to_db()`
+
+入口条件：
+
+- `content` 为空则不写。
+- `group_id` 不在白名单则不写。
+
+同一数据库连接、同一事务内严格依次执行：
+
+1. `INSERT OR IGNORE` 写群消息表。相同 `message_id` 不重复插入。
+2. `user_info` 使用 UPSERT 更新 QQ 昵称和全局最后发言时间。
+3. `user_group_info` 使用 UPSERT 更新群名片和群内最后发言时间。
+4. `commit()`。
+
+即使第 1 步因重复消息被 `IGNORE`，后两步用户资料更新仍会继续执行。
+
+异常被记录后不向上抛出，避免一次存库失败中断消息处理。
+
+<a id="database-write-entries"></a>
+
+### 9.3 数据写入入口
+
+| 场景 | 入口 | 规则 |
+|---|---|---|
+| Bot 连接后的历史同步 | `sync_history_on_startup()` | 每条历史分别解析和插入 |
+| 普通白名单群消息 | `record_chat_history()` | 跳过 `@机器人`，防止与 AI Handler 竞争 |
+| 触发 AI 的用户消息 | `handle_ai_chat()` | 在任何模型调用前先强制保存 |
+| `Waiting……` 快速回复 | `send_and_save()` | 发送成功且获得 `message_id` 才保存 |
+| 正式回复或错误提示 | `send_and_save()` | 同上 |
+
+<a id="database-audit"></a>
+
+### 9.4 数据库未改动的核查结论
+
+当前数据库相关代码实际使用 10 个 SQL 模板：
+
+- 1 条 WAL。
+- 3 条建表语句。
+- 1 条近期时间戳查询。
+- 3 条消息/用户写入语句。
+- 2 条历史与昵称查询。
+
+本次视觉附件修改没有改动这些 SQL。事务顺序、白名单判断、去重规则、查询排序、
+当前消息排除和保存入口也没有变化。
+
+后续若修改数据库相关代码，应至少复核本文数据库相关章节列出的不变量。
+
+<a id="visual-processing"></a>
+
+## 10. 视觉附件与 AI 富文本
+
+<a id="image-summary-label"></a>
+
+### 10.1 `summary` 是通用标签
 
 代码不枚举 `summary` 的具体内容，也不把某一种标签当作特殊类型：
 
@@ -585,7 +963,9 @@ SQLite 缓存及机器性能影响；代码没有承诺固定耗时。
 数据库仍保存原 `summary` 或 `[图片]`；当前消息和引用消息则在保留该标签的同时，
 尽可能把支持格式的视觉内容交给模型。
 
-### 9.2 视觉附件发送规范
+<a id="visual-send-spec"></a>
+
+### 10.2 视觉附件发送规范
 
 只把以下格式的图片内容发送给模型：
 
@@ -626,7 +1006,21 @@ HEIF 和 SVG。JPEG、PNG、WebP 映射到对应 MIME 并继续读取完整文�
 文件名可以没有后缀，也可以与真实格式不一致，不会影响识别结果。只有成功识别
 为 JPEG、PNG 或 WebP 的内容才进入 OpenAI/Gemini 视觉协议。
 
-### 9.3 `resolve_visual_attachment()`
+<a id="fn-append-visual-notice"></a>
+
+### 10.3 `_append_visual_notice()`
+
+把 `（未发送：原因）` 追加到原视觉标签。标签以 `[` 开头、`]` 结尾时把说明插入右方括号之前；其他标签直接在末尾追加。
+
+<a id="fn-detect-image-format"></a>
+
+### 10.4 `_detect_image_format()`
+
+只依据最多 64 字节文件头识别 JPEG、PNG、WebP、GIF、BMP、TIFF、ICO、AVIF、HEIC、HEIF 和 SVG，返回格式名及受支持格式的 MIME。只有 JPEG、PNG、WebP 返回 MIME；未知内容返回 `(None, None)`。
+
+<a id="fn-resolve-visual-attachment"></a>
+
+### 10.5 `resolve_visual_attachment()`
 
 处理流程：
 
@@ -644,113 +1038,39 @@ HEIF 和 SVG。JPEG、PNG、WebP 映射到对应 MIME 并继续读取完整文�
 10. 支持时在线程池读取完整文件并转换为 Base64。
 11. 返回 `ResolvedVisual`。
 
-### 9.4 `ChatService.resolve_visuals()` 与占位组装
+<a id="local-read-header"></a>
 
-`resolve_visuals()` 使用 `asyncio.gather()` 并行解析各附件，避免多个待落地文件的
-等待时间逐项累加；`gather()` 的返回结果仍保持原消息顺序。
+#### `read_header()`
 
-解析器先在富文本原位置写入内部标记，并把同一个图片段的 `file_id`、`path` 与
-`summary` 标签放进 `VisualAttachment`。`apply_visual_placeholders()` 在格式判断
-完成后，将每个内部标记替换为对应的原标签或未发送说明。这样不需要根据
-`[图片]`、`[动画表情]`、`[臭]` 或其他标签做字符串猜测，也不会写死任何
-`summary`。
+`resolve_visual_attachment()` 的局部函数，在线程池中打开文件并读取最多 64 字节，只用于真实格式识别。
 
-之后只把 `sendable=True` 的视觉附件交给协议层；其他附件的失败原因已经直接显示
-在原位置，不再额外生成重复清单。只要存在实际发送的附件，系统提示就会说明：
-附件按当前提问（包括一层引用）中的出现顺序排列，并且不来自历史记录。
+<a id="local-read-file"></a>
 
-用户手写 `[图片]` 等文字不会触发视觉流程。只有解析器实际遇到结构化 `image`
-消息段时才会生成内部标记并登记附件。
+#### `read_file()`
 
-最终回复头的图片数是成功读取并实际发送的数量，而不是原消息中的图片段数量。
+`resolve_visual_attachment()` 的局部函数，仅在确认 MIME 受支持后在线程池中读取完整文件并转换为 Base64。
 
-## 10. API 正文解析
+<a id="fn-extract-ai-content"></a>
 
-### 10.1 `_get_openai_message()`
+### 10.6 `extract_ai_content()`
 
-按标准 OpenAI 兼容响应取得：
+AI 富文本兼容入口，创建 `OneBotMessageParser` 并使用 `for_ai=True` 解析，返回 `(text, visual_attachments)` 元组。AI Handler 无需直接操作 `ParsedMessage`。
 
-```text
-data.choices[0].message
-```
+<a id="third-party-search"></a>
 
-字段缺失、列表为空或首项不是对象时通常返回空字典。这里默认服务器遵守标准
-响应结构；若服务器以 HTTP 200 返回严重畸形的 `choices` 类型，异常会交给主
-Handler 的通用错误边界处理，不额外兼容这种服务端错误。Gemini 的
-`candidates` 采用相同原则。
+## 11. 第三方博查搜索
 
-### 10.2 `_extract_api_reply_text()`
+<a id="third-search-freshness-values"></a>
 
-- OpenAI：读取第一条 `message.content`，必须是字符串。
-- Gemini：读取第一条 candidate 的 `content.parts`，从后向前寻找最后一个非空 `text`。
-- 数据格式不合法或无正文时返回空字符串。
+### 11.1 `THIRD_SEARCH_FRESHNESS_VALUES` 与 `_is_valid_search_freshness()`
 
-`ChatService.complete()` 会把最终空正文替换成 `（模型API拒绝回复）`。
+<a id="fn-is-valid-search-freshness"></a>
 
-## 11. 模型原生搜索
+`THIRD_SEARCH_FRESHNESS_VALUES` 列出 `noLimit`、`oneDay`、`oneWeek`、`oneMonth`、`oneYear` 五个预设值。`_is_valid_search_freshness()` 只接受这些预设、真实存在的 `YYYY-MM-DD` 日期，或起始日期不晚于结束日期的 `YYYY-MM-DD..YYYY-MM-DD` 范围；其他类型、无效日期和倒序范围返回 `False`。
 
-### 11.1 `_enable_openai_native_search()`
+<a id="third-search-tool"></a>
 
-该函数只负责修改 OpenAI 兼容请求，并返回“适配器标识”：
-
-| `model_id` 特征 | 请求参数 | 适配器 |
-|---|---|---|
-| 包含 `glm` | 带 `enable=True` 的 `web_search` 工具 | `glm_web_search` |
-| 包含 `moonshot` | `$web_search` 内置函数 | `moonshot_web_search` |
-| 其他 | `web_search=True, network=True` | `generic_search` |
-
-以后适配新 OpenAI 兼容中转时，应优先在此扩展请求格式，不要在 `handle_ai_chat()` 增加模型判断。
-
-### 11.2 `_parse_openai_native_search_response()`
-
-该函数统一解析 OpenAI 兼容回包中的搜索证据，优先级如下：
-
-1. OpenAI `message.tool_calls` 数量。
-2. `server_side_tool_usage` 中键名包含 `SEARCH` 的整数合计。
-3. `num_server_side_tools_used`。
-4. `num_sources_used`。
-5. `citations` 或 `sources` 列表长度。
-
-如果搜索已启用，但中转没有返回任何可核实字段，则构造：
-
-```text
-performed=None, count=None
-```
-
-最终回复头不显示搜索字段。
-
-### 11.3 Gemini 原生搜索
-
-请求通过：
-
-```json
-{"tools": [{"googleSearch": {}}]}
-```
-
-`ChatService.parse_gemini_reply()` 解析：
-
-1. 优先使用 `groundingMetadata.webSearchQueries` 数量。
-2. 没有查询列表时，统计 `groundingChunks` 中包含 `web` 的条目。
-3. 无 grounding 证据时不显示搜索数字。
-
-### 11.4 当前待讨论点
-
-不同中转站对同一模型可能要求完全不同的请求字段，用户也难以理解手工 `api_type` 或搜索适配器名称。当前仍采用配置加 `model_id` 特征判断，尚未实现自动试探。
-
-若以后实现自动探测，应考虑：
-
-- 只在何种错误码或回包特征下重试。
-- 如何避免一次用户提问产生多个计费请求。
-- 探测结果是否按模型/端点缓存。
-- OpenAI 与 Gemini 请求能否安全互试。
-- 原生搜索不生效但请求成功时如何识别。
-- 如何避免把正常“没有搜”误判为“不支持搜索”。
-
-这部分应单独设计，不应直接在主 Handler 中堆叠重试。
-
-## 12. 第三方博查搜索
-
-### 12.1 `THIRD_SEARCH_TOOL`
+### 11.2 `THIRD_SEARCH_TOOL`
 
 提供给 OpenAI 兼容模型的函数工具：
 
@@ -764,7 +1084,9 @@ performed=None, count=None
 - `include`、`exclude` 只在需要限定或排除网站时填写，无需限制时省略。
 - 返回数量和是否生成摘要不交给模型控制。
 
-### 12.2 `bocha_search()`
+<a id="fn-bocha-search"></a>
+
+### 11.3 `bocha_search()`
 
 请求固定包含：
 
@@ -791,7 +1113,15 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
 
 每条结果可包含标题、链接、来源、时间、摘要和与摘要不同的全文概要。响应中的结果会逐条校验；格式异常或没有任何有效正文信息的条目会被跳过，不会导致同批其他有效结果丢失。标题或链接缺失时不会输出对应的空字段，返回数量只统计可用条目。当前只处理网页结果，只有图片结果时按没有可用结果处理。
 
-### 12.3 `_execute_web_search()`
+<a id="local-clean-text"></a>
+
+#### `clean_text()`
+
+`bocha_search()` 的局部函数。字段值是字符串时去除首尾空白，否则返回空字符串，用于逐条规范化标题、链接、摘要、来源和发布时间，不让单个可选字段的类型异常破坏整批结果。
+
+<a id="fn-execute-web-search"></a>
+
+### 11.4 `_execute_web_search()`
 
 批量执行一轮 `tool_calls`：
 
@@ -809,7 +1139,9 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
 
 工具调用结构错误和参数格式错误都会反馈给模型修正，并占用当前搜索轮次，但不直接算作博查 API 失败。若后续仍有轮次且模型再次请求工具，则继续进入下一轮。
 
-### 12.4 `_run_openai_third_search_workflow()`
+<a id="fn-run-openai-third-search-workflow"></a>
+
+### 11.5 `_run_openai_third_search_workflow()`
 
 处理完整工具循环：
 
@@ -828,9 +1160,46 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
 
 后续模型请求非 200 会向上抛出，由主 Handler 的通用异常边界处理。
 
-## 13. 历史文本和提示词
+<a id="history-and-prefix"></a>
 
-### 13.1 `_format_history_text()`
+## 12. 历史读取、格式化与回复头
+
+<a id="fn-load-history-rows"></a>
+
+### 12.1 `_load_history_rows()`
+
+读取当前群的历史：
+
+1. 连接群消息表。
+2. 左连接全局昵称和本群名片。
+3. 排除当前触发消息的 `message_id`。
+4. 按 `timestamp DESC, rowid DESC` 获取最近 `dynamic_limit` 条。
+5. 查询结束后 `reverse()`，恢复成从旧到新的提示词顺序。
+
+排除当前触发消息很重要：该消息已经提前存库，但会在提示词最后作为“当前问题”单独加入，不能在历史中重复出现。
+
+当前消息表没有为 `timestamp` 建立额外索引，因此 `LIMIT` 只限制返回条数，并不保证
+查询耗时与表内总记录数无关。表达到百万条后，排序和筛选仍可能受总数据量、磁盘、
+SQLite 缓存及机器性能影响；代码没有承诺固定耗时。
+
+<a id="fn-load-user-display-map"></a>
+
+### 12.2 `_load_user_display_map()`
+
+读取当前群用户的显示名映射：
+
+- 群名片与 QQ 昵称不同：`群名片（QQ昵称：QQ昵称）`。
+- 两者相同：只显示一个名称。
+- 缺少群名片时依次回退 QQ 昵称、用户 ID。
+
+该映射用于把历史消息中的数字 `@` 和引用发言人 ID 转换成可读名称。
+
+<a id="fn-format-history-text"></a>
+
+### 12.3 `_format_history_text()`
+
+<a id="local-convert-reply-time"></a>
+<a id="local-convert-at"></a>
 
 内部包含两个局部转换函数：
 
@@ -848,7 +1217,62 @@ QQ 昵称不同时显示 `群名片（QQ昵称：昵称）`，相同时只显示
 
 历史顺序是从旧到新。
 
-### 13.2 `ChatService.build_prompts()`
+<a id="fn-format-reply-prefix"></a>
+
+### 12.4 `_format_reply_prefix()`
+
+基础格式：
+
+```text
+模型：模型名，记录：历史条数
+```
+
+按需追加：
+
+- 至少一张图片成功发送给模型 → `，图片：n`。
+- `SearchResult.prefix_value()` 有值 → `，搜索：n/False`。
+
+最后追加换行，模型正文紧随其后。
+
+<a id="class-chat-service"></a>
+
+## 13. `ChatService` 业务编排
+
+<a id="method-chat-service-select-model"></a>
+
+### 13.1 `select_model()`
+
+只根据 `event.get_plaintext().strip()` 判断模型和模式，不处理图片或引用。返回 `ModelSelection`。
+
+<a id="method-chat-service-resolve-visuals"></a>
+
+### 13.2 `resolve_visuals()`
+
+`resolve_visuals()` 使用 `asyncio.gather()` 并行解析各附件，避免多个待落地文件的
+等待时间逐项累加；`gather()` 的返回结果仍保持原消息顺序。
+
+<a id="method-chat-service-apply-visual-placeholders"></a>
+
+### 13.3 `apply_visual_placeholders()`
+
+解析器先在富文本原位置写入内部标记，并把同一个图片段的 `file_id`、`path` 与
+`summary` 标签放进 `VisualAttachment`。`apply_visual_placeholders()` 在格式判断
+完成后，将每个内部标记替换为对应的原标签或未发送说明。这样不需要根据
+`[图片]`、`[动画表情]`、`[臭]` 或其他标签做字符串猜测，也不会写死任何
+`summary`。
+
+之后只把 `sendable=True` 的视觉附件交给协议层；其他附件的失败原因已经直接显示
+在原位置，不再额外生成重复清单。只要存在实际发送的附件，系统提示就会说明：
+附件按当前提问（包括一层引用）中的出现顺序排列，并且不来自历史记录。
+
+用户手写 `[图片]` 等文字不会触发视觉流程。只有解析器实际遇到结构化 `image`
+消息段时才会生成内部标记并登记附件。
+
+最终回复头的图片数是成功读取并实际发送的数量，而不是原消息中的图片段数量。
+
+<a id="method-chat-service-build-prompts"></a>
+
+### 13.4 `build_prompts()`
 
 完整步骤：
 
@@ -875,7 +1299,9 @@ QQ 昵称不同时显示 `群名片（QQ昵称：昵称）`，相同时只显示
 
 无历史时省略历史区块。
 
-### 13.3 发给 AI 的完整视觉示例
+<a id="visual-request-example"></a>
+
+### 13.5 发给 AI 的完整视觉示例
 
 假设数据库历史中已有一条图片占位；用户当前发送一个 `summary=[臭]`、文件内容
 为 WebP 的附件，引用了一条 `summary=[动画表情]`、文件内容为 GIF 的附件，随后
@@ -944,13 +1370,9 @@ Base64 数据属于协议附件，不会直接拼进模型看到的文本。若 
 不会有对应的 `image_url` 或 `inlineData`。若文件头无法识别，则原位置会变为
 `[臭（未发送：无法识别图片格式）]`。
 
-## 14. `ChatService` 业务编排
+<a id="method-chat-service-build-model-request"></a>
 
-### 14.1 `select_model()`
-
-只根据 `event.get_plaintext().strip()` 判断模型和模式，不处理图片或引用。返回 `ModelSelection`。
-
-### 14.2 `build_model_request()`
+### 13.6 `build_model_request()`
 
 #### OpenAI 兼容格式
 
@@ -973,11 +1395,27 @@ Base64 数据属于协议附件，不会直接拼进模型看到的文本。若 
 
 未知 `api_type` 抛出 `UnsupportedAPITypeError`。
 
-### 14.3 `parse_gemini_reply()`
+<a id="method-chat-service-parse-gemini-reply"></a>
 
-同时提取正文和 grounding 搜索计数，详见原生搜索章节。
+### 13.7 `parse_gemini_reply()`
 
-### 14.4 `send_model_request()`
+同时提取正文和 grounding 搜索计数；原生搜索证据的解析规则如下。
+
+请求通过：
+
+```json
+{"tools": [{"googleSearch": {}}]}
+```
+
+`ChatService.parse_gemini_reply()` 解析：
+
+1. 优先使用 `groundingMetadata.webSearchQueries` 数量。
+2. 没有查询列表时，统计 `groundingChunks` 中包含 `web` 的条目。
+3. 无 grounding 证据时不显示搜索数字。
+
+<a id="method-chat-service-send-model-request"></a>
+
+### 13.8 `send_model_request()`
 
 1. 使用共享会话发送首轮请求。
 2. 首轮非 200 抛出 `ModelHTTPError`，保留上游响应文本。
@@ -986,7 +1424,9 @@ Base64 数据属于协议附件，不会直接拼进模型看到的文本。若 
 5. 普通 OpenAI：只返回正文。
 6. Gemini：调用 `parse_gemini_reply()`。
 
-### 14.5 `complete()`
+<a id="method-chat-service-complete"></a>
+
+### 13.9 `complete()`
 
 一次正式对话的总编排：
 
@@ -1001,43 +1441,19 @@ Base64 数据属于协议附件，不会直接拼进模型看到的文本。若 
 
 `complete()` 不直接发送 QQ 消息，也不直接操作数据库，使业务层可单独测试。
 
-## 15. 回复头与消息发送
+<a id="nonebot-events"></a>
 
-### 15.1 `_format_reply_prefix()`
+## 14. 服务实例与 NoneBot 事件入口
 
-基础格式：
+<a id="chat-service-instance"></a>
 
-```text
-模型：模型名，记录：历史条数
-```
+### 14.1 `chat_service`
 
-按需追加：
+模块加载时创建一个 `ChatService` 实例，供 `handle_ai_chat()` 复用；服务对象本身不保存单次对话状态。
 
-- 至少一张图片成功发送给模型 → `，图片：n`。
-- `SearchResult.prefix_value()` 有值 → `，搜索：n/False`。
+<a id="fn-sync-history-on-startup"></a>
 
-最后追加换行，模型正文紧随其后。
-
-### 15.2 `send_and_save()`
-
-职责是“发送 QQ 消息 + 成功后保存机器人消息 + 可选结束 Handler”：
-
-1. 首次调用 `matcher.send()`。
-2. 发送失败写 `warning`。
-3. 正式消息 `is_finish=True` 时，间隔 1 秒最多重试 3 次。
-4. 快速回复不重试。
-5. 只有返回字典且带 `message_id` 时才尝试存库。
-6. 机器人身份优先从登录信息和群成员信息获取。
-7. 身份查询失败时回退 `AI助手` 和 `bot.self_id`。
-8. 使用数据库消息解析器规范化机器人发出的 `MessageSegment`。
-9. 调用 `insert_message_to_db()`。
-10. `is_finish=True` 时调用 `matcher.finish()`。
-
-即使所有正式发送尝试都失败，最后仍会结束当前 Handler；不会让同一事件无限挂起。
-
-## 16. NoneBot 事件入口
-
-### 16.1 `sync_history_on_startup()`
+### 14.2 `sync_history_on_startup()`
 
 注册在 `driver.on_bot_connect`：
 
@@ -1052,7 +1468,11 @@ Base64 数据属于协议附件，不会直接拼进模型看到的文本。若 
 
 由于群消息表按 `message_id` 唯一，重复连接同步不会重复插入同一消息。
 
-### 16.2 `record_chat_history()`
+<a id="record-handler"></a>
+
+### 14.3 `record_handler` 与 `record_chat_history()`
+
+<a id="fn-record-chat-history"></a>
 
 `priority=1, block=False`，用于被动记录：
 
@@ -1061,7 +1481,11 @@ Base64 数据属于协议附件，不会直接拼进模型看到的文本。若 
 - `event.is_tome()` 跳过，避免和 AI Handler 重复处理触发消息。
 - 保存昵称、群名片、用户 ID 和规范化消息。
 
-### 16.3 `handle_ai_chat()`
+<a id="chat-handler"></a>
+
+### 14.4 `chat_handler` 与 `handle_ai_chat()`
+
+<a id="fn-handle-ai-chat"></a>
 
 `rule=to_me(), priority=50, block=True`，主处理流程：
 
@@ -1092,74 +1516,9 @@ Base64 数据属于协议附件，不会直接拼进模型看到的文本。若 
 - `FinishedException` → 必须重新抛出，不能被通用异常吞掉。
 - 其他异常 → 记录完整堆栈并回复“调用出错”。
 
-## 17. 全部函数与方法速查
+## 15. 日志与异常策略
 
-| 名称 | 类型 | 作用 |
-|---|---|---|
-| `ResolvedVisual.sendable` | 属性 | 判断附件是否同时具有 MIME 和 Base64 数据 |
-| `SearchResult.prefix_value` | 方法 | 把搜索状态转成回复头值 |
-| `ModelSelection.api_type` | 属性 | 获取协议类型，默认 OpenAI |
-| `ModelSelection.api_url` | 属性 | 生成实际请求 URL |
-| `ModelSelection.vision_enabled` | 属性 | 判断是否支持视觉 |
-| `ModelSelection.search_enabled` | 属性 | 判断是否启用原生搜索 |
-| `ModelSelection.use_third_search` | 属性 | 判断是否使用博查工具 |
-| `ModelSelection.information` | 属性 | 生成快速提示的模型/模式文本 |
-| `_get_openai_message` | 函数 | 安全读取 OpenAI 第一条 message |
-| `_extract_api_reply_text` | 函数 | 统一提取 OpenAI/Gemini 正文 |
-| `_enable_openai_native_search` | 函数 | 按模型特征组装原生搜索请求 |
-| `_parse_openai_native_search_response` | 函数 | 统一解析 OpenAI 兼容回包中的搜索证据 |
-| `init_http_session` | 启动钩子 | 创建共享 HTTP 会话 |
-| `close_http_session` | 关闭钩子 | 关闭共享 HTTP 会话 |
-| `get_http_session` | 函数 | 返回或惰性创建共享会话 |
-| `validate_configuration` | 启动钩子 | 非阻断地报告配置问题 |
-| `init_db` | 启动钩子 | 设置 WAL 并初始化表 |
-| `get_dynamic_history_length` | 异步函数 | 算法或 AI 决定历史条数 |
-| `_visual_placeholder_token` | 函数 | 为视觉附件保留原富文本位置 |
-| `OneBotMessageParser.__init__` | 方法 | 保存 Bot 与群号上下文 |
-| `OneBotMessageParser._segment_type_and_data` | 静态方法 | 兼容字典和 MessageSegment |
-| `OneBotMessageParser._image_placeholder` | 静态方法 | 读取任意 summary，缺省为 `[图片]` |
-| `OneBotMessageParser._image_file_id` | 静态方法 | 选择可供 `get_image()` 使用的文件标识 |
-| `OneBotMessageParser._render_ai_image` | 类方法 | 保留图片位置并登记视觉附件 |
-| `OneBotMessageParser._format_member_at` | 方法 | 把 QQ ID 转成可读 `@` |
-| `OneBotMessageParser._render_storage_segment` | 方法 | 渲染数据库单段 |
-| `OneBotMessageParser._render_quoted_ai_segment` | 方法 | 渲染一层引用内部单段 |
-| `OneBotMessageParser._render_ai_reply` | 方法 | 获取并展开一层引用 |
-| `OneBotMessageParser._render_ai_segment` | 方法 | 渲染当前 AI 消息单段 |
-| `OneBotMessageParser.parse` | 方法 | 消息解析总入口 |
-| `parse_message_content` | 兼容函数 | 返回数据库存储文本 |
-| `send_and_save` | 异步函数 | 发送、重试、保存机器人消息并结束 |
-| `insert_message_to_db` | 异步函数 | 在单事务内写消息和用户资料 |
-| `_append_visual_notice` | 函数 | 在原 summary 标签上追加具体的未发送原因 |
-| `_detect_image_format` | 函数 | 读取文件头结果并识别真实图片格式 |
-| `resolve_visual_attachment` | 异步函数 | 按文件头解析视觉附件、生成占位并按需编码 |
-| `read_header` | 局部函数 | 在线程池中读取最多 64 字节文件头 |
-| `read_file` | 局部函数 | 在线程池中读取图片并转 Base64 |
-| `extract_ai_content` | 函数 | 返回 AI 富文本和视觉附件 |
-| `_is_valid_search_freshness` | 函数 | 校验博查预设、单日或日期范围 |
-| `bocha_search` | 异步函数 | 调用并格式化博查结果 |
-| `_execute_web_search` | 异步函数 | 执行一批工具调用 |
-| `_run_openai_third_search_workflow` | 异步函数 | 管理多轮第三方搜索 |
-| `_load_history_rows` | 异步函数 | 查询并正序返回历史 |
-| `_load_user_display_map` | 异步函数 | 生成当前群昵称映射 |
-| `convert_reply_time` | 局部函数 | 格式化历史引用时间/发言人 |
-| `convert_at` | 局部函数 | 格式化历史中的数字 `@` |
-| `_format_history_text` | 函数 | 生成模型可读群聊历史 |
-| `_format_reply_prefix` | 函数 | 生成固定正式回复头 |
-| `ChatService.select_model` | 静态方法 | 解析模型前缀和对话模式 |
-| `ChatService.resolve_visuals` | 静态异步方法 | 并行解析视觉附件并保持原顺序 |
-| `ChatService.apply_visual_placeholders` | 静态方法 | 将格式结果写回最终用户提示词 |
-| `ChatService.build_prompts` | 静态异步方法 | 准备身份、历史和提示词 |
-| `ChatService.build_model_request` | 静态方法 | 生成 OpenAI/Gemini 请求 |
-| `ChatService.parse_gemini_reply` | 静态方法 | 解析 Gemini 正文和搜索数 |
-| `ChatService.send_model_request` | 静态异步方法 | 首轮请求和协议分流 |
-| `ChatService.complete` | 异步方法 | 完成一次正式 AI 调用 |
-| `sync_history_on_startup` | Bot 连接钩子 | 同步白名单群历史 |
-| `record_chat_history` | Handler | 被动保存普通群消息 |
-| `handle_ai_chat` | Handler | 处理完整 `@机器人` 对话 |
-
-## 18. 日志与异常策略
-
-### 18.1 `logger.exception` 的意义
+### 15.1 `logger.exception` 的意义
 
 `logger.exception("说明")` 应在 `except` 块中使用。它相当于错误级别日志，并自动附带当前异常的完整 traceback。
 
@@ -1178,7 +1537,7 @@ logger.error(f"失败: {e}")
 
 这对“Handler 最后只看到调用失败，但真正错误发生在数据库、图片或 HTTP 解析深处”的问题非常有价值。
 
-### 18.2 为什么不应全部使用 `logger.exception`
+### 15.2 为什么不应全部使用 `logger.exception`
 
 代价包括：
 
@@ -1196,7 +1555,7 @@ logger.error(f"失败: {e}")
 | `exception` | 无法预知原因的数据库、图片、搜索、同步或最终调用异常 |
 | `error` | 缺少 `default`、默认模式无效等明显基础配置错误 |
 
-### 18.3 当前 `logger.exception` 边界
+### 15.3 当前 `logger.exception` 边界
 
 | 位置 | 为什么需要 traceback | 失败后的行为 |
 |---|---|---|
@@ -1213,7 +1572,7 @@ logger.error(f"失败: {e}")
 
 当前这些位置都位于有效的 `except` 块中，使用方式正确。日志字符串中已经包含 `{e}`，而 `logger.exception` 还会在 traceback 末尾显示一次异常；这略有重复但便于单行检索，不影响功能。
 
-## 19. 关键容错与边界行为
+## 16. 关键容错与边界行为
 
 1. 配置检查只报告，不阻止启动。
 2. 数据库读失败时使用空历史或默认历史条数。
@@ -1229,7 +1588,7 @@ logger.error(f"失败: {e}")
 11. 模型原生搜索无可核实统计字段时不显示搜索字段。
 12. 第三方搜索最后一轮强制回答，避免模型一直要求继续搜索。
 
-## 20. 扩展代码时应改哪里
+## 17. 扩展代码时应改哪里
 
 ### 新增 OneBot 消息段
 
@@ -1271,7 +1630,7 @@ logger.error(f"失败: {e}")
 - 历史排序和当前消息排除是否保留。
 - 启动同步、被动记录、触发消息和机器人回复是否仍全部覆盖。
 
-## 21. 维护和回归检查建议
+## 18. 维护和回归检查建议
 
 每次修改后至少执行：
 
@@ -1294,23 +1653,23 @@ git diff --check
 | 第三方搜索 | 无工具调用、单轮、多轮、无结果、失败、参数错误 |
 | 发送 | 快速回复、正式回复重试、存库失败、`finish()` |
 
-## 22. 后续接手的推荐阅读顺序
+## 19. 后续接手的推荐阅读顺序
 
 若只想快速定位问题：
 
-1. 先读本文第 2 节调用图。
-2. 用户消息理解错误：读第 7 节和 `OneBotMessageParser`。
-3. 历史不正确：读第 6、8、13 节。
-4. 图片不工作：读第 9 节。
-5. 模型请求不兼容：读第 10、11、14 节。
-6. 博查搜索异常：读第 12 节。
-7. QQ 不回复或重复保存：读第 15、16 节。
-8. 线上出现堆栈：按第 18 节判断是可恢复失败还是非预期故障。
+1. 先读本文第 2 节的两棵架构树和可跳转导航。
+2. 用户消息理解错误：读第 8 节和 `OneBotMessageParser`。
+3. 历史不正确：读第 6、7、12、13 节。
+4. 图片不工作：读第 10 节。
+5. 模型请求不兼容：读第 5、13 节。
+6. 博查搜索异常：读第 11 节。
+7. QQ 不回复或重复保存：读第 9、14 节。
+8. 线上出现堆栈：按第 15 节判断是可恢复失败还是非预期故障。
 
 若准备修改代码：
 
 1. 明确改动属于解析、协议、业务还是 Handler。
 2. 尽量在对应层扩展，不跨层复制逻辑。
-3. 对照本文的数据库不变量、关键容错和边界行为，确认旧功能没有丢失。
-4. 特别保护第 6 节数据库不变量。
-5. 运行第 21 节的回归检查。
+3. 对照第 6、9、12 节的数据库不变量和第 16 节的关键容错，确认旧功能没有丢失。
+4. 特别保护数据库表结构、事务顺序、去重、排序、当前消息排除和四类保存入口。
+5. 运行第 18 节的回归检查。

@@ -879,30 +879,37 @@ async def parse_message_content(bot: Bot, group_id: int, raw_message) -> str:
 
 
 # ========== 辅助函数：统一发送并存入数据库 ==========
-async def send_and_save(bot: Bot, event: GroupMessageEvent, matcher, msg, is_finish: bool = False):
-    send_result = None
-    try:
-        send_result = await matcher.send(msg)
-    except Exception as e:
-        logger.warning(
-            f"[AI Chat] 消息首次发送失败: {type(e).__name__}: {e}"
-        )
-        if is_finish:
-            # 正式回复发送失败时最多再重试 3 次；通道永久失效时只记录日志。
-            for retry_num in range(1, 4):
-                await asyncio.sleep(1)
-                try:
-                    send_result = await matcher.send(msg)
-                    break
-                except Exception as retry_error:
-                    logger.warning(
-                        f"[AI Chat] 正式回复第 {retry_num}/3 次重试失败: "
-                        f"{type(retry_error).__name__}: {retry_error}"
-                    )
+async def _send_with_retry(matcher, msg, label: str):
+    """发送消息，失败时按 3 秒间隔最多重试 3 次。返回 send 结果或 None。"""
+    for attempt in range(4):  # 首次 + 最多 3 次重试
+        if attempt:
+            await asyncio.sleep(3)
+        try:
+            return await matcher.send(msg)
+        except Exception as e:
+            suffix = f"（第 {attempt}/3 次重试失败）" if attempt else ""
+            logger.warning(
+                f"[AI Chat] {label}发送失败{suffix}: {type(e).__name__}: {e}"
+            )
+    return None
+
+
+async def send_and_save(bot: Bot, event: GroupMessageEvent, matcher, msg, is_finish: bool = False, fallback_msg=None):
+    # 所有消息统一重试：首次发送失败后按 3 秒间隔最多重试 3 次
+    send_result = await _send_with_retry(
+        matcher, msg, "正式回复" if is_finish else "消息"
+    )
+    sent_msg = msg
+    # 发送彻底失败且提供了备用提示时，改发备用提示（同样 3 秒 × 最多 3 次）
+    if send_result is None and fallback_msg is not None:
+        logger.warning("[AI Chat] 消息发送彻底失败，改发备用提示")
+        send_result = await _send_with_retry(matcher, fallback_msg, "备用提示")
+        if send_result is not None:
+            sent_msg = fallback_msg
 
     if isinstance(send_result, dict) and "message_id" in send_result:
         try:
-            content_to_save = await parse_message_content(bot, event.group_id, msg)
+            content_to_save = await parse_message_content(bot, event.group_id, sent_msg)
             bot_msg_id = send_result["message_id"]
             bot_timestamp = int(datetime.datetime.now().timestamp())
 
@@ -2171,12 +2178,19 @@ async def handle_ai_chat(bot: Bot, event: Event):
             + "\n"
             + MessageSegment.text(f"{prefix_hint}{completion.reply.text}")
         )
+        # 发送彻底失败时的备用提示：保留 @ 与消息头，正文替换为拦截提示（与空回复格式一致）
+        fallback_msg = (
+            MessageSegment.at(event.user_id)
+            + "\n"
+            + MessageSegment.text(f"{prefix_hint}（消息被拦截，发送失败）")
+        )
         await send_and_save(
             bot,
             event,
             chat_handler,
             msg,
-            is_finish=True
+            is_finish=True,
+            fallback_msg=fallback_msg
         )
     except UnsupportedAPITypeError:
         logger.warning(

@@ -165,6 +165,7 @@ NoneBot / OneBot 事件
          └─ 返回 ChatCompletion
       ├─ _format_reply_prefix()
       └─ send_and_save()
+         └─ _send_with_retry()
 ```
 
 ### 2.3 可跳转的源码顺序导航
@@ -213,7 +214,7 @@ NoneBot / OneBot 事件
     - [`parse()`](#method-parser-parse)遍历消息并返回 `ParsedMessage`。
   - [`parse_message_content()`](#fn-parse-message-content)提供数据库存储兼容入口。
 - QQ 发送与数据库写入
-  - [`send_and_save()`](#fn-send-and-save)发送、按需重试、保存机器人消息并结束 Handler。
+  - [`send_and_save()`](#fn-send-and-save)统一 3 秒×3 重试、发送彻底失败改发备用提示、保存机器人消息并结束 Handler。
   - [`insert_message_to_db()`](#fn-insert-message-to-db)在一个事务内写消息和两类用户资料。
 - 视觉附件与 AI 富文本
   - [`_append_visual_notice()`](#fn-append-visual-notice)把未发送原因写回原标签。
@@ -880,18 +881,17 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 职责是“发送 QQ 消息 + 成功后保存机器人消息 + 可选结束 Handler”：
 
-1. 首次调用 `matcher.send()`。
-2. 发送失败写 `warning`。
-3. 正式消息 `is_finish=True` 时，间隔 1 秒最多重试 3 次。
-4. 快速回复不重试。
-5. 只有返回字典且带 `message_id` 时才尝试存库。
-6. 机器人身份优先从登录信息和群成员信息获取。
-7. 身份查询失败时回退 `AI助手` 和 `bot.self_id`。
-8. 使用数据库消息解析器规范化机器人发出的 `MessageSegment`。
-9. 调用 `insert_message_to_db()`。
-10. `is_finish=True` 时调用 `matcher.finish()`。
+1. 调用 `_send_with_retry()` 统一发送：首次 `matcher.send()`，失败写 `warning` 并按 3 秒间隔最多重试 3 次。
+2. 所有消息（`Waiting……` 快速回复、正式回复、错误提示）走同一重试规则，不区分 `is_finish`。
+3. 发送彻底失败且调用方提供了 `fallback_msg`（仅正式 AI 回复）时，改发备用提示（同样 3 秒 × 最多 3 次）；备用提示也全部失败才最终放弃，不存库、无更多输出。
+4. 只有返回字典且带 `message_id` 时才尝试存库，存库内容跟随实际送达的消息（原回复或备用提示）。
+5. 机器人身份优先从登录信息和群成员信息获取。
+6. 身份查询失败时回退 `AI助手` 和 `bot.self_id`。
+7. 使用数据库消息解析器规范化机器人发出的 `MessageSegment`。
+8. 调用 `insert_message_to_db()`。
+9. `is_finish=True` 时调用 `matcher.finish()`。
 
-即使所有正式发送尝试都失败，最后仍会结束当前 Handler；不会让同一事件无限挂起。
+即使所有发送尝试都失败，最后仍会结束当前 Handler；不会让同一事件无限挂起。
 
 <a id="fn-insert-message-to-db"></a>
 
@@ -924,6 +924,7 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 | 触发 AI 的用户消息 | `handle_ai_chat()` | 在任何模型调用前先强制保存 |
 | `Waiting……` 快速回复 | `send_and_save()` | 发送成功且获得 `message_id` 才保存 |
 | 正式回复或错误提示 | `send_and_save()` | 同上 |
+| 正式回复被拦截 | `send_and_save()` | 原回复彻底发送失败后改发备用提示（保留 `@` 与消息头，正文替换为“（回复被拦截，发送失败）”） |
 
 <a id="database-audit"></a>
 
@@ -1583,7 +1584,7 @@ logger.error(f"失败: {e}")
 6. 引用只展开一层，避免套娃请求。
 7. 未知非空消息段保留 `[seg_type]`。
 8. 模型空正文转换为明确占位。
-9. 正式 QQ 回复发送失败最多重试三次。
+9. 所有 QQ 消息发送失败统一按 3 秒间隔最多重试三次；正式回复彻底失败时改发备用提示（同样 3 秒 × 最多 3 次）。
 10. `FinishedException` 必须重新抛出，维持 NoneBot 的流程控制。
 11. 模型原生搜索无可核实统计字段时不显示搜索字段。
 12. 第三方搜索最后一轮强制回答，避免模型一直要求继续搜索。
@@ -1651,7 +1652,7 @@ git diff --check
 | OpenAI | 纯文本、JPEG/PNG/WebP Data URL、格式拦截、原生搜索、第三方搜索 |
 | Gemini | 纯文本、JPEG/PNG/WebP `inlineData`、格式拦截、`googleSearch`、grounding 计数 |
 | 第三方搜索 | 无工具调用、单轮、多轮、无结果、失败、参数错误 |
-| 发送 | 快速回复、正式回复重试、存库失败、`finish()` |
+| 发送 | 统一 3 秒×3 重试、拦截备用提示、存库失败、`finish()` |
 
 ## 19. 后续接手的推荐阅读顺序
 

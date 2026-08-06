@@ -77,6 +77,7 @@ easy_ai.py
 ├─ 数据库存储、QQ 发送与写库
 │  ├─ parse_message_content()
 │  ├─ send_and_save()
+│  │  └─ _send_with_retry()
 │  └─ insert_message_to_db()
 │
 ├─ 视觉附件与 AI 富文本
@@ -214,7 +215,8 @@ NoneBot / OneBot 事件
     - [`parse()`](#method-parser-parse)遍历消息并返回 `ParsedMessage`。
   - [`parse_message_content()`](#fn-parse-message-content)提供数据库存储兼容入口。
 - QQ 发送与数据库写入
-  - [`send_and_save()`](#fn-send-and-save)统一 3 秒×3 重试、发送彻底失败改发备用提示、保存机器人消息并结束 Handler。
+  - [`_send_with_retry()`](#fn-send-with-retry)统一发送一条消息，失败按 3 秒间隔最多重试 3 次。
+  - [`send_and_save()`](#fn-send-and-save)统一重试发送、发送彻底失败改发备用提示、保存机器人消息并结束 Handler。
   - [`insert_message_to_db()`](#fn-insert-message-to-db)在一个事务内写消息和两类用户资料。
 - 视觉附件与 AI 富文本
   - [`_append_visual_notice()`](#fn-append-visual-notice)把未发送原因写回原标签。
@@ -875,27 +877,40 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 ## 9. QQ 发送与数据库写入
 
+<a id="fn-send-with-retry"></a>
+
+### 9.1 `_send_with_retry()`
+
+职责是“统一发送一条消息并带回退”：
+
+1. 首次调用 `matcher.send(msg)`。
+2. 失败写 `warning`，日志含发送对象（`label`）与重试编号。
+3. 每次重试前等待 3 秒，最多重试 3 次（共 4 次尝试）。
+4. 任意一次成功立即返回 send 结果（含 `message_id` 的字典）。
+5. 全部失败返回 `None`，由调用方决定后续（改发备用提示或放弃）。
+
+`send_and_save()` 对正式回复、`Waiting……` 快速回复和错误提示统一使用本函数，不区分 `is_finish`。
+
 <a id="fn-send-and-save"></a>
 
-### 9.1 `send_and_save()`
+### 9.2 `send_and_save()`
 
 职责是“发送 QQ 消息 + 成功后保存机器人消息 + 可选结束 Handler”：
 
-1. 调用 `_send_with_retry()` 统一发送：首次 `matcher.send()`，失败写 `warning` 并按 3 秒间隔最多重试 3 次。
-2. 所有消息（`Waiting……` 快速回复、正式回复、错误提示）走同一重试规则，不区分 `is_finish`。
-3. 发送彻底失败且调用方提供了 `fallback_msg`（仅正式 AI 回复）时，改发备用提示（同样 3 秒 × 最多 3 次）；备用提示也全部失败才最终放弃，不存库、无更多输出。
-4. 只有返回字典且带 `message_id` 时才尝试存库，存库内容跟随实际送达的消息（原回复或备用提示）。
-5. 机器人身份优先从登录信息和群成员信息获取。
-6. 身份查询失败时回退 `AI助手` 和 `bot.self_id`。
-7. 使用数据库消息解析器规范化机器人发出的 `MessageSegment`。
-8. 调用 `insert_message_to_db()`。
-9. `is_finish=True` 时调用 `matcher.finish()`。
+1. 调用 `_send_with_retry()`（见 9.1）统一发送所有消息，不区分 `is_finish`。
+2. 发送彻底失败且调用方提供了 `fallback_msg`（仅正式 AI 回复）时，改发备用提示（同样 3 秒 × 最多 3 次）；备用提示也全部失败才最终放弃，不存库、无更多输出。
+3. 只有返回字典且带 `message_id` 时才尝试存库，存库内容跟随实际送达的消息（原回复或备用提示）。
+4. 机器人身份优先从登录信息和群成员信息获取。
+5. 身份查询失败时回退 `AI助手` 和 `bot.self_id`。
+6. 使用数据库消息解析器规范化机器人发出的 `MessageSegment`。
+7. 调用 `insert_message_to_db()`（见 9.3）。
+8. `is_finish=True` 时调用 `matcher.finish()`。
 
 即使所有发送尝试都失败，最后仍会结束当前 Handler；不会让同一事件无限挂起。
 
 <a id="fn-insert-message-to-db"></a>
 
-### 9.2 `insert_message_to_db()`
+### 9.3 `insert_message_to_db()`
 
 入口条件：
 
@@ -915,7 +930,7 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 <a id="database-write-entries"></a>
 
-### 9.3 数据写入入口
+### 9.4 数据写入入口
 
 | 场景 | 入口 | 规则 |
 |---|---|---|
@@ -928,7 +943,7 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 <a id="database-audit"></a>
 
-### 9.4 数据库未改动的核查结论
+### 9.5 数据库未改动的核查结论
 
 当前数据库相关代码实际使用 10 个 SQL 模板：
 

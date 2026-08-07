@@ -2,7 +2,7 @@
 
 > 文档目的：帮助维护者快速理解 `easy_ai.py` 的整体结构、完整调用链、数据库不变量、消息格式、模型协议、搜索行为和异常边界。  
 > 对应代码：当前单文件版 `easy_ai.py`。  
-> 最后核对日期：2026-07-31。
+> 最后核对日期：2026-08-07。
 
 ## 1. 项目定位与设计约束
 
@@ -77,7 +77,7 @@ easy_ai.py
 ├─ 数据库存储、QQ 发送与写库
 │  ├─ parse_message_content()
 │  ├─ send_and_save()
-│  │  └─ _send_with_retry()
+│  │  └─ _send_loop()
 │  └─ insert_message_to_db()
 │
 ├─ 视觉附件与 AI 富文本
@@ -166,7 +166,7 @@ NoneBot / OneBot 事件
          └─ 返回 ChatCompletion
       ├─ _format_reply_prefix()
       └─ send_and_save()
-         └─ _send_with_retry()
+         └─ _send_loop()
 ```
 
 ### 2.3 可跳转的源码顺序导航
@@ -215,8 +215,8 @@ NoneBot / OneBot 事件
     - [`parse()`](#method-parser-parse)遍历消息并返回 `ParsedMessage`。
   - [`parse_message_content()`](#fn-parse-message-content)提供数据库存储兼容入口。
 - QQ 发送与数据库写入
-  - [`_send_with_retry()`](#fn-send-with-retry)统一发送一条消息，失败按 3 秒间隔最多重试 3 次。
-  - [`send_and_save()`](#fn-send-and-save)统一重试发送、发送彻底失败改发备用提示、保存机器人消息并结束 Handler。
+  - [`_send_loop()`](#fn-send-loop)无限重发一条消息直到成功，日志含重试编号；由外层超时统一收口。
+  - [`send_and_save()`](#fn-send-and-save)统一重试发送、发送超时/彻底失败改发备用提示、保存机器人消息并结束 Handler。
   - [`insert_message_to_db()`](#fn-insert-message-to-db)在一个事务内写消息和两类用户资料。
 - 视觉附件与 AI 富文本
   - [`_append_visual_notice()`](#fn-append-visual-notice)把未发送原因写回原标签。
@@ -277,6 +277,7 @@ NoneBot / OneBot 事件
 | `DYNAMIC_HISTORY_MODEL` | 前置 AI 使用的模型键 | 不存在时沿用原逻辑回退 `default` |
 | `DYNAMIC_HISTORY_TIMEOUT` | 前置 AI 请求超时 | 超时或回包无数字时使用默认 80 条 |
 | `AI_CHAT_TIMEOUT` | 正式模型与第三方搜索后续模型轮次的超时 | `aiohttp` 超时会被主 Handler 单独处理 |
+| `SEND_RETRY_TIMEOUT` | 单条 QQ 消息发送总超时 | 期间无限重发，超时判定为发送失败（如敏感词被拦截）并进入备用流程 |
 | `IMAGE_BASE_DIR` | NapCat 图片目录映射 | 留空信任 NapCat 绝对路径；非空时只取文件名再拼接 |
 | `DEFAULT_MODE` | 无模型前缀时的模式 | 必须是 `serious` 或 `casual` |
 
@@ -877,17 +878,17 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 ## 9. QQ 发送与数据库写入
 
-<a id="fn-send-with-retry"></a>
+<a id="fn-send-loop"></a>
 
-### 9.1 `_send_with_retry()`
+### 9.1 `_send_loop()`
 
-职责是“统一发送一条消息并带回退”：
+职责是“无限重发一条消息直到成功”：
 
-1. 首次调用 `matcher.send(msg)`。
-2. 失败写 `warning`，日志含发送对象（`label`）与重试编号。
-3. 每次重试前等待 3 秒，最多重试 3 次（共 4 次尝试）。
-4. 任意一次成功立即返回 send 结果（含 `message_id` 的字典）。
-5. 全部失败返回 `None`，由调用方决定后续（改发备用提示或放弃）。
+1. 循环调用 `matcher.send(msg)`，任意一次成功立即返回 send 结果（含 `message_id` 的字典）。
+2. 失败写 `warning`，日志含发送对象（`label`）与当前尝试编号（第 N 次）。
+3. 失败后不等待、立即重试，不限制重试次数。
+4. 本函数不自行结束循环；由外层 `asyncio.wait_for` 以 `SEND_RETRY_TIMEOUT`（默认 10 秒）超时取消，超时视为发送失败（典型场景：敏感词被 NapCat 拦截，单次发送需约 10 秒才返回失败）。
+5. 被超时取消后由调用方决定后续（改发备用提示或放弃）。
 
 `send_and_save()` 对正式回复、`Waiting……` 快速回复和错误提示统一使用本函数，不区分 `is_finish`。
 
@@ -897,8 +898,8 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 职责是“发送 QQ 消息 + 成功后保存机器人消息 + 可选结束 Handler”：
 
-1. 调用 `_send_with_retry()`（见 9.1）统一发送所有消息，不区分 `is_finish`。
-2. 发送彻底失败且调用方提供了 `fallback_msg`（仅正式 AI 回复）时，改发备用提示（同样 3 秒 × 最多 3 次）；备用提示也全部失败才最终放弃，不存库、无更多输出。
+1. 调用 `_send_loop()`（见 9.1）并用 `asyncio.wait_for(..., timeout=SEND_RETRY_TIMEOUT)` 统一收口发送所有消息，不区分 `is_finish`；快速失败立即重发，超过超时判定为失败。
+2. 发送超时/彻底失败且调用方提供了 `fallback_msg`（仅正式 AI 回复）时，改发备用提示（同样受 `SEND_RETRY_TIMEOUT` 超时收口）；备用提示也失败才最终放弃，不存库、无更多输出。
 3. 只有返回字典且带 `message_id` 时才尝试存库，存库内容跟随实际送达的消息（原回复或备用提示）。
 4. 机器人身份优先从登录信息和群成员信息获取。
 5. 身份查询失败时回退 `AI助手` 和 `bot.self_id`。
@@ -1599,7 +1600,7 @@ logger.error(f"失败: {e}")
 6. 引用只展开一层，避免套娃请求。
 7. 未知非空消息段保留 `[seg_type]`。
 8. 模型空正文转换为明确占位。
-9. 所有 QQ 消息发送失败统一按 3 秒间隔最多重试三次；正式回复彻底失败时改发备用提示（同样 3 秒 × 最多 3 次）。
+9. 所有 QQ 消息发送由 `_send_loop()` 无限重发、失败立即重试，外层按 `SEND_RETRY_TIMEOUT`（默认 10 秒）超时收口；正式回复超时/彻底失败时改发备用提示（同样受超时收口）。
 10. `FinishedException` 必须重新抛出，维持 NoneBot 的流程控制。
 11. 模型原生搜索无可核实统计字段时不显示搜索字段。
 12. 第三方搜索最后一轮强制回答，避免模型一直要求继续搜索。
@@ -1667,7 +1668,7 @@ git diff --check
 | OpenAI | 纯文本、JPEG/PNG/WebP Data URL、格式拦截、原生搜索、第三方搜索 |
 | Gemini | 纯文本、JPEG/PNG/WebP `inlineData`、格式拦截、`googleSearch`、grounding 计数 |
 | 第三方搜索 | 无工具调用、单轮、多轮、无结果、失败、参数错误 |
-| 发送 | 统一 3 秒×3 重试、拦截备用提示、存库失败、`finish()` |
+| 发送 | 无限重发 + 10 秒超时收口、拦截备用提示、存库失败、`finish()` |
 
 ## 19. 后续接手的推荐阅读顺序
 

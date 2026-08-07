@@ -24,6 +24,7 @@ DYNAMIC_HISTORY_MODEL = "default"   # 决定上下文条数的模型标识 (对�
 
 DYNAMIC_HISTORY_TIMEOUT = 30  # 动态决定历史记录条数(前置AI)的超时时间（秒）
 AI_CHAT_TIMEOUT = 120         # 正式聊天(正式AI)的超时时间（秒）
+SEND_RETRY_TIMEOUT = 10       # 单条消息发送总超时（秒）：期间无限重发，超时判定为发送失败（如敏感词被拦截）
 
 # 图片本地缓存目录配置
 # 1. 如果代码和 NapCat 在同一台电脑/同一个 Docker 容器内，请保持留空 ""，程序会自动读取绝对路径。
@@ -879,31 +880,41 @@ async def parse_message_content(bot: Bot, group_id: int, raw_message) -> str:
 
 
 # ========== 辅助函数：统一发送并存入数据库 ==========
-async def _send_with_retry(matcher, msg, label: str):
-    """发送消息，失败时按 3 秒间隔最多重试 3 次。返回 send 结果或 None。"""
-    for attempt in range(4):  # 首次 + 最多 3 次重试
-        if attempt:
-            await asyncio.sleep(3)
+async def _send_loop(matcher, msg, label: str):
+    """无限重发直到成功；由外层 wait_for 超时（SEND_RETRY_TIMEOUT）统一收口。"""
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             return await matcher.send(msg)
         except Exception as e:
-            suffix = f"（第 {attempt}/3 次重试失败）" if attempt else ""
             logger.warning(
-                f"[AI Chat] {label}发送失败{suffix}: {type(e).__name__}: {e}"
+                f"[AI Chat] {label}发送失败（第 {attempt} 次）: {type(e).__name__}: {e}，立即重试"
             )
-    return None
 
 
 async def send_and_save(bot: Bot, event: GroupMessageEvent, matcher, msg, is_finish: bool = False, fallback_msg=None):
-    # 所有消息统一重试：首次发送失败后按 3 秒间隔最多重试 3 次
-    send_result = await _send_with_retry(
-        matcher, msg, "正式回复" if is_finish else "消息"
-    )
+    # 无限重发直到成功，超过 SEND_RETRY_TIMEOUT 秒仍未成功则视为失败（如敏感词被 NapCat 拦截）
+    try:
+        send_result = await asyncio.wait_for(
+            _send_loop(matcher, msg, "正式回复" if is_finish else "消息"),
+            timeout=SEND_RETRY_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"[AI Chat] 消息发送超过 {SEND_RETRY_TIMEOUT}s 未成功，进入备用流程")
+        send_result = None
     sent_msg = msg
-    # 发送彻底失败且提供了备用提示时，改发备用提示（同样 3 秒 × 最多 3 次）
+    # 发送失败且提供了备用提示时，改发备用提示（同样受超时收口）
     if send_result is None and fallback_msg is not None:
         logger.warning("[AI Chat] 消息发送彻底失败，改发备用提示")
-        send_result = await _send_with_retry(matcher, fallback_msg, "备用提示")
+        try:
+            send_result = await asyncio.wait_for(
+                _send_loop(matcher, fallback_msg, "备用提示"),
+                timeout=SEND_RETRY_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("[AI Chat] 备用提示发送也超时，放弃发送")
+            send_result = None
         if send_result is not None:
             sent_msg = fallback_msg
 

@@ -289,7 +289,6 @@ NoneBot / OneBot 事件
 |---|---|
 | `THIRD_SEARCH_API_KEY` | 博查 API Key；为空时第三方搜索不会启用 |
 | `THIRD_SEARCH_API_URL` | 博查搜索端点 |
-| `THIRD_SEARCH_COUNT` | 单次最多请求的结果数；整数会被限制在 1–50，非整数按 10 请求 |
 | `THIRD_SEARCH_TIMEOUT` | 单次博查请求超时 |
 | `MAX_SEARCH_ROUNDS` | 模型最多产生的搜索批次总数；小于等于 0 时禁用第三方工具 |
 | `ENABLE_THIRD_SEARCH` | 第三方搜索总开关 |
@@ -1093,24 +1092,26 @@ AI 富文本兼容入口，创建 `OneBotMessageParser` 并使用 `for_ai=True` 
 
 - 工具名：`web_search`。
 - 必填参数：`query`。
-- 可选参数：`freshness`、`include`、`exclude`。
+- 可选参数：`freshness`、`include`、`exclude`、`count`、`summary`。
 - `freshness` 可选 `noLimit`、`oneDay`、`oneWeek`、`oneMonth`、`oneYear`，
   也可使用 `YYYY-MM-DD` 指定一天，或使用
   `YYYY-MM-DD..YYYY-MM-DD` 指定日期范围；不限制时间时省略，程序按
   `noLimit` 请求。
 - `include`、`exclude` 只在需要限定或排除网站时填写，无需限制时省略。
-- 返回数量和是否生成摘要不交给模型控制。
+- `count`：本轮希望返回的搜索结果条数（1–50 的整数），按问题复杂程度由
+  AI 自行决定；不填默认 25，后端始终限制在 1–50，非法类型回退默认 25。
+- `summary`：是否要求博查为每条结果生成正文概要；不填默认 `true`。
 
 <a id="fn-bocha-search"></a>
 
 ### 11.3 `bocha_search()`
 
-请求固定包含：
+请求包含：
 
 - `query`。
 - 模型选择的 `freshness`；未提供时为 `"noLimit"`。
-- `summary=True`。
-- `count`：`THIRD_SEARCH_COUNT` 为整数时限制在 1–50，非整数时使用 10。
+- `summary`：AI 通过工具参数指定，未指定时默认 `True`。
+- `count`：AI 通过工具参数指定，限制在 1–50；未指定时默认 25，非法类型回退默认 25。
 
 `include`、`exclude` 仅在非空时传入。
 
@@ -1150,11 +1151,12 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
    向 `messages` 追加明确工具错误。
 6. 调用 `bocha_search()`并累计结果数量。
 7. 将搜索文本、`搜索无结果` 或 `搜索失败` 作为 `role=tool` 结果追加。
-8. 无法组成合法工具消息的结构错误通过系统反馈文本交给模型修正。
+8. 无法组成合法工具消息的结构错误直接抛出，由主 Handler 的统一异常边界向用户提示。
+   这类错误由 API 服务端生成结构保证，正常厂商下几乎不可能出现；模型也看不到原始错误对象、无法据此修正。
 
 只返回本批取得的结果数。单次搜索是否成功仅用于向模型反馈 `搜索无结果` 或 `搜索失败`，不再向工作流累计失败状态。
 
-工具调用结构错误和参数格式错误都会反馈给模型修正，并占用当前搜索轮次，但不直接算作博查 API 失败。若后续仍有轮次且模型再次请求工具，则继续进入下一轮。
+参数格式错误（`arguments` JSON、参数类型、`freshness` 等）会反馈给模型修正，并占用当前搜索轮次，但不直接算作博查 API 失败。若后续仍有轮次且模型再次请求工具，则继续进入下一轮。
 
 <a id="fn-run-openai-third-search-workflow"></a>
 
@@ -1164,12 +1166,13 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
 
 1. 从首轮回包读取 `tool_calls`。
 2. 首轮没有调用工具：直接返回正文，标记“已提供搜索能力但未搜索”。
-3. 有工具调用：执行第一批搜索，追加合法的 assistant/tool 消息或结构错误反馈。
+3. 有工具调用：执行第一批搜索，追加合法的 assistant/tool 消息；参数错误以
+   `role=tool` 错误反馈让模型修正；外层结构错误直接抛出。
 4. 继续调用模型，让模型阅读结果、回答或修正搜索词。
 5. 非最后一轮继续提供搜索工具。
 6. 最后一轮移除工具，并向系统提示词追加“搜索轮次已用完，必须直接回答”。
 7. 累计所有批次的结果数量；总数大于 0 时显示实际总数，即使中间有轮次失败。
-8. 只有所有批次最终都没有取得结果时，才以 `performed=True, count=0` 显示 `搜索：False`，包括空结果、网络错误、请求失败和工具调用格式错误。
+8. 只有所有批次最终都没有取得结果时，才以 `performed=True, count=0` 显示 `搜索：False`，包括空结果、网络错误、请求失败和工具参数格式错误。
 
 在默认 `MAX_SEARCH_ROUNDS=3` 时，搜索批次最多为三批：首轮一批，加上后续最多两批；最后一次模型请求被强制生成文本。
 

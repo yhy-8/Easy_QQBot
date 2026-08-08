@@ -36,7 +36,6 @@ DEFAULT_MODE = "casual"  # 无前缀时默认模式: "serious"(严肃) 或 "casu
 # ===== 第三方搜索配置 =====
 THIRD_SEARCH_API_KEY = ""                                    # 博查AI API Key
 THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端点
-THIRD_SEARCH_COUNT = 25                                      # 单次搜索返回条数（运行时限制在 1-50）
 THIRD_SEARCH_TIMEOUT = 30                                    # 第三方搜索请求超时时间（秒）
 MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数；小于等于0时不提供第三方搜索工具
 ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关 (True/False)，仅当模型无原生搜索时生效
@@ -1202,6 +1201,22 @@ THIRD_SEARCH_TOOL = {
                         "仅需排除网站时填写，多个域名用|或,分隔"
                         "（如 zhihu.com|weibo.com）；不排除则省略"
                     )
+                },
+                "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": (
+                        "本轮希望返回的搜索结果条数（1-50 的整数），"
+                        "可按问题复杂程度自行决定，不填默认 25"
+                    )
+                },
+                "summary": {
+                    "type": "boolean",
+                    "description": (
+                        "是否要求博查为每条结果生成正文概要，"
+                        "不填默认 true；建议保留以便判断结果是否值得深入"
+                    )
                 }
             },
             "required": ["query"]
@@ -1215,7 +1230,9 @@ async def bocha_search(
         query: str,
         include: str = "",
         exclude: str = "",
-        freshness: str = "noLimit"
+        freshness: str = "noLimit",
+        count: int = 25,
+        summary: bool = True
 ) -> tuple[str, int, bool]:
     """调用博查AI搜索API，返回 (格式化搜索文本, 结果数量, 是否成功)"""
     if not THIRD_SEARCH_API_KEY or not query:
@@ -1224,19 +1241,19 @@ async def bocha_search(
         logger.warning(f"[AI Chat] 博查搜索时间范围无效: {freshness!r}")
         return "", 0, False
 
-    if type(THIRD_SEARCH_COUNT) is int:
-        request_count = min(max(THIRD_SEARCH_COUNT, 1), 50)
-        if request_count != THIRD_SEARCH_COUNT:
+    if isinstance(count, bool) or not isinstance(count, int):
+        request_count = 25
+        logger.warning(
+            f"[AI Chat] 搜索条数 count={count!r} 无效，按默认 25 请求"
+        )
+    else:
+        request_count = min(max(count, 1), 50)
+        if request_count != count:
             logger.warning(
-                f"[AI Chat] THIRD_SEARCH_COUNT={THIRD_SEARCH_COUNT} 超出 1-50，"
+                f"[AI Chat] 搜索条数 count={count} 超出 1-50，"
                 f"本次按 {request_count} 请求"
             )
-    else:
-        request_count = 10
-        logger.warning(
-            f"[AI Chat] THIRD_SEARCH_COUNT={THIRD_SEARCH_COUNT!r} 不是整数，"
-            "本次按 10 请求"
-        )
+    request_summary = summary if isinstance(summary, bool) else True
 
     headers = {
         "Content-Type": "application/json",
@@ -1245,7 +1262,7 @@ async def bocha_search(
     body = {
         "query": query,
         "freshness": freshness,
-        "summary": True,
+        "summary": request_summary,
         "count": request_count
     }
     if include:
@@ -1375,12 +1392,22 @@ async def bocha_search(
 
 
 # ========== 辅助函数：批量执行 web_search 工具调用 ==========
-async def _execute_web_search(messages: list, tool_calls: object) -> int:
-    """执行搜索工具调用并将结果追加到 messages，返回本批搜索条数。"""
+async def _execute_web_search(messages: list, assistant_msg: object) -> int:
+    """执行搜索工具调用并将结果追加到 messages，返回本批搜索条数。
+
+    完整保留模型原始 assistant 消息中的 content / reasoning_content，
+    再追加 tool 结果，避免多轮 Tool Calling 丢失思考内容。
+
+    外层结构错误（由 API 服务端生成结构保证，正常厂商下几乎不可能出现）
+    直接抛出 ValueError，交给统一异常边界向用户提示，不反馈给模型重试。
+    """
     count = 0
     valid_calls = []
     format_errors = []
 
+    if not isinstance(assistant_msg, dict):
+        assistant_msg = {}
+    tool_calls = assistant_msg.get("tool_calls")
     if not isinstance(tool_calls, list):
         format_errors.append("tool_calls 必须是数组")
         tool_calls = []
@@ -1423,11 +1450,14 @@ async def _execute_web_search(messages: list, tool_calls: object) -> int:
         valid_calls.append(normalized_call)
 
     if valid_calls:
-        messages.append({
+        preserved_msg = {
             "role": "assistant",
-            "content": None,
             "tool_calls": valid_calls
-        })
+        }
+        for field_name in ("content", "reasoning_content"):
+            if field_name in assistant_msg:
+                preserved_msg[field_name] = assistant_msg[field_name]
+        messages.append(preserved_msg)
 
     for tc in valid_calls:
         call_id = tc["id"]
@@ -1459,6 +1489,8 @@ async def _execute_web_search(messages: list, tool_calls: object) -> int:
         include = args.get("include", "")
         exclude = args.get("exclude", "")
         freshness = args.get("freshness", "noLimit")
+        count_arg = args.get("count", 25)
+        summary_arg = args.get("summary", True)
         if (not isinstance(query, str) or not query.strip()
                 or not isinstance(include, str) or not isinstance(exclude, str)):
             messages.append({
@@ -1484,7 +1516,9 @@ async def _execute_web_search(messages: list, tool_calls: object) -> int:
             query.strip(),
             include=include.strip(),
             exclude=exclude.strip(),
-            freshness=freshness
+            freshness=freshness,
+            count=count_arg,
+            summary=summary_arg
         )
         count += sc
         messages.append({
@@ -1494,15 +1528,13 @@ async def _execute_web_search(messages: list, tool_calls: object) -> int:
         })
 
     if format_errors:
-        messages.append({
-            "role": "user",
-            "content": (
-                "[系统工具调用错误反馈]\n"
-                + "\n".join(format_errors)
-                + "\n请严格按照已提供的 tools 定义修正调用格式；"
-                  "如仍需搜索，请在下一轮重新调用工具。"
-            )
-        })
+        # 外层结构错误（缺 id、type 错、arguments 非字符串等）由 API 服务端
+        # 生成结构保证，正常厂商下几乎不可能出现；且模型看不到原始错误对象、
+        # 无法据此修正，反馈只会让模型盲改。直接抛出交给统一异常边界，
+        # 向用户提示错误，不再反馈给模型重试。
+        raise ValueError(
+            "工具调用协议格式错误：\n" + "\n".join(format_errors)
+        )
 
     return count
 
@@ -1536,7 +1568,7 @@ async def _run_openai_third_search_workflow(
         )
 
     total_search_count = 0
-    batch_count = await _execute_web_search(messages, tool_calls)
+    batch_count = await _execute_web_search(messages, current_msg)
     total_search_count += batch_count
 
     reply_text = ""
@@ -1581,7 +1613,7 @@ async def _run_openai_third_search_workflow(
 
         tool_calls = current_msg.get("tool_calls")
         if tool_calls is not None and tool_calls != [] and not is_last:
-            batch_count = await _execute_web_search(messages, tool_calls)
+            batch_count = await _execute_web_search(messages, current_msg)
             total_search_count += batch_count
         else:
             reply_text = (current_msg.get("content") or "").strip()

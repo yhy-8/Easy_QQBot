@@ -1449,6 +1449,16 @@ async def _execute_web_search(messages: list, assistant_msg: object) -> int:
         }
         valid_calls.append(normalized_call)
 
+    if format_errors:
+        # 外层结构错误（缺 id、type 错、arguments 非字符串等）由 API 服务端
+        # 生成结构保证，正常厂商下几乎不可能出现；且模型看不到原始错误对象、
+        # 无法据此修正，反馈只会让模型盲改。此处提前抛出：混合批次（既有合法
+        # 调用又有非法调用）不再执行任何搜索，避免白白消耗博查搜索 API；
+        # 直接交给统一异常边界向用户提示。
+        raise ValueError(
+            "工具调用协议格式错误：\n" + "\n".join(format_errors)
+        )
+
     if valid_calls:
         preserved_msg = {
             "role": "assistant",
@@ -1526,15 +1536,6 @@ async def _execute_web_search(messages: list, assistant_msg: object) -> int:
             "tool_call_id": call_id,
             "content": search_text if search_text else ("搜索无结果" if search_ok else "搜索失败")
         })
-
-    if format_errors:
-        # 外层结构错误（缺 id、type 错、arguments 非字符串等）由 API 服务端
-        # 生成结构保证，正常厂商下几乎不可能出现；且模型看不到原始错误对象、
-        # 无法据此修正，反馈只会让模型盲改。直接抛出交给统一异常边界，
-        # 向用户提示错误，不再反馈给模型重试。
-        raise ValueError(
-            "工具调用协议格式错误：\n" + "\n".join(format_errors)
-        )
 
     return count
 

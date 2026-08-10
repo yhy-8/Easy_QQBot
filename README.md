@@ -8,7 +8,7 @@
 具备简单的模型可选能力  
 具备一定的图片识别能力（需要模型支持）   
 具备联网搜索能力（支持模型原生搜索 + 第三方博查API搜索）  
-依据时间尺度的对话频率，结合ai动态调整聊天记录浏览范围
+依据对话频率和当前消息，由 AI 动态决定读取历史记录条数
 
 ---
 
@@ -191,7 +191,7 @@ MODELS_CONFIG = {
 | `ALLOWED_GROUPS` | 允许机器人响应的群号列表 |
 | `DB_PATH` | SQLite 数据库路径；请确保上级目录存在且机器人有写入权限 |
 | `ENABLE_QUICK_ACK` | 是否先回复"Waiting……"提示，缓解等待焦虑 |
-| `ENABLE_AI_HISTORY_DECISION` | 开启后由AI根据群聊活跃度动态决定读取多少条历史 |
+| `ENABLE_AI_HISTORY_DECISION` | 开启后由 AI 决定读取多少聊天记录；关闭后使用本地统计方式 |
 | `DYNAMIC_HISTORY_MODEL` | 上述决策使用的模型，通常用最便宜的模型 |
 | `DYNAMIC_HISTORY_TIMEOUT` | 前置决策AI超时秒数 |
 | `AI_CHAT_TIMEOUT` | 正式聊天中每次模型请求的超时秒数，包括搜索后的后续请求 |

@@ -2098,17 +2098,20 @@ chat_service = ChatService()
 
 # ========== 事件入口层共享规则：判定消息是否针对机器人 ==========
 async def is_message_to_bot(bot: Bot, event: Event) -> bool:
-    """判断消息是否针对机器人：包含 @机器人 或文字提及机器人昵称。
+    """判断消息是否针对机器人。
 
-    不使用 to_me() / event.to_me：在部分场景（如图片在前 @在后）下服务端
-    计算的 to_me 不可靠，会导致机器人无法被触发，因此改为直接从消息段判断。
-    本函数是事件入口层两个 Handler（record_chat_history / chat_handler）
-    共用的触发判定规则。
+    优先沿用服务端 to_me 字段（正常 @ 场景可靠）；在其不可靠时（如图片在前
+    @在后）回退到直接检查消息段与昵称。本函数是事件入口层两个 Handler
+    （record_chat_history / chat_handler）共用的触发判定规则。
     """
     if not isinstance(event, GroupMessageEvent):
         return False
+    # 1) 服务端 to_me 字段优先：正常 @ 机器人的消息都可靠，可立即命中。
+    if getattr(event, "to_me", False):
+        return True
+    # 2) 兜底：从原消息段直接判断，覆盖图片在前 @ 在后等 to_me 不可靠场景。
     try:
-        for seg in event.get_message():
+        for seg in event.original_message:
             if seg.type == "at" and str(seg.data.get("qq")) == str(bot.self_id):
                 return True
         if _bot_nickname:

@@ -9,7 +9,6 @@ import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from nonebot import on_message, get_driver, logger
-from nonebot.rule import to_me
 from nonebot.adapters.onebot.v11 import Bot, Event, MessageSegment, GroupMessageEvent
 from nonebot.exception import FinishedException
 
@@ -487,11 +486,12 @@ async def get_dynamic_history_length(
 
     固定算法仍只查询最近 2 小时；AI 决策使用最近 6 小时的统计，
     并仅把当前消息的富文本表示作为判断依据。
+    提示词中会告知 AI 当前时间，以便其正确解读富文本（如引用回复）中出现的具体时间。
     """
 
     # --- 提取条数限制配置区 ---
     MIN_LIMIT = 50  # 允许提取的最小历史条数
-    MAX_LIMIT = 500  # 允许提取的最大历史条数
+    MAX_LIMIT = 300  # 允许提取的最大历史条数
     DEFAULT_LIMIT = 80  # API失败或兜底时使用的默认值
     # -----------------------
 
@@ -558,9 +558,12 @@ async def get_dynamic_history_length(
 
     stats_text = ", ".join([f"{k}: {v}条" for k, v in stats.items()])
     current_message_text = current_message.strip() or "（无可用的富文本内容）"
+    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     prompt = (
         f"你是一个用于评估对话上下文长度的计算模块。请根据以下最近6小时的群聊活跃度数据和当前消息，决定需要提取的历史记录条数。\n\n"
+        f"【当前时间】\n"
+        f"现在是 {current_time}；富文本中出现的引用回复时间可据此判断相对新旧。\n\n"
         f"【活跃度数据】\n"
         f"{stats_text}\n\n"
         f"【当前消息富文本】\n"
@@ -2093,6 +2096,30 @@ class ChatService:
 chat_service = ChatService()
 
 
+# ========== 事件入口层共享规则：判定消息是否针对机器人 ==========
+async def is_message_to_bot(bot: Bot, event: Event) -> bool:
+    """判断消息是否针对机器人：包含 @机器人 或文字提及机器人昵称。
+
+    不使用 to_me() / event.to_me：在部分场景（如图片在前 @在后）下服务端
+    计算的 to_me 不可靠，会导致机器人无法被触发，因此改为直接从消息段判断。
+    本函数是事件入口层两个 Handler（record_chat_history / chat_handler）
+    共用的触发判定规则。
+    """
+    if not isinstance(event, GroupMessageEvent):
+        return False
+    try:
+        for seg in event.get_message():
+            if seg.type == "at" and str(seg.data.get("qq")) == str(bot.self_id):
+                return True
+        if _bot_nickname:
+            text = event.get_plaintext()
+            if text and _bot_nickname in text:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 # ========== 1. 机器人启动时自动拉取同步历史记录 ==========
 @driver.on_bot_connect
 async def sync_history_on_startup(bot: Bot):
@@ -2150,7 +2177,7 @@ async def record_chat_history(bot: Bot, event: Event):
     if event.group_id not in ALLOWED_GROUPS:
         return
     # 如果消息是 @机器人的，跳过被动记录，避免与 chat_handler 竞争写入
-    if event.is_tome():
+    if await is_message_to_bot(bot, event):
         return
 
     qq_nickname = event.sender.nickname if event.sender and event.sender.nickname else "未知用户"
@@ -2162,7 +2189,7 @@ async def record_chat_history(bot: Bot, event: Event):
 
 
 # ========== 3. 处理用户的 @ 提问 ==========
-chat_handler = on_message(rule=to_me(), priority=50, block=True)
+chat_handler = on_message(rule=is_message_to_bot, priority=50, block=True)
 
 @chat_handler.handle()
 async def handle_ai_chat(bot: Bot, event: Event):

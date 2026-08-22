@@ -2,7 +2,7 @@
 
 > 文档目的：帮助维护者快速理解 `easy_ai.py` 的整体结构、完整调用链、数据库不变量、消息格式、模型协议、搜索行为和异常边界。  
 > 对应代码：当前单文件版 `easy_ai.py`。  
-> 最后同步时间：2026-08-10 13:26（Asia/Shanghai）。
+> 最后同步时间：2026-08-22 20:15（Asia/Shanghai）。
 
 ## 1. 项目定位与设计约束
 
@@ -116,6 +116,7 @@ easy_ai.py
 ├─ chat_service 实例
 │
 └─ NoneBot 生命周期与事件入口
+   ├─ is_message_to_bot()     事件入口层共享触发判定规则
    ├─ sync_history_on_startup()
    ├─ record_handler → record_chat_history()
    └─ chat_handler → handle_ai_chat()
@@ -140,10 +141,11 @@ NoneBot / OneBot 事件
 │
 ├─ 普通群消息
 │  └─ record_chat_history()
-│     └─ parse_message_content() → insert_message_to_db()
+│     ├─ is_message_to_bot() 为真 → 跳过（交由 chat_handler 处理）
+│     └─ 否则 parse_message_content() → insert_message_to_db()
 │
-└─ @机器人
-   └─ handle_ai_chat()
+└─ @机器人 / 提及机器人
+   └─ is_message_to_bot() 通过 → handle_ai_chat()
       ├─ 先保存触发消息
       ├─ ChatService.select_model()
       ├─ extract_ai_content()
@@ -245,6 +247,7 @@ NoneBot / OneBot 事件
   - [`complete()`](#method-chat-service-complete)串联一次正式 AI 调用并返回 `ChatCompletion`。
   - [`chat_service`](#chat-service-instance)是事件层复用的服务实例。
 - NoneBot 生命周期与事件入口
+  - [`is_message_to_bot()`](#fn-is-message-to-bot)事件入口层共享触发判定规则；`record_chat_history()` 与 `chat_handler` 共用。
   - [`sync_history_on_startup()`](#fn-sync-history-on-startup)在 Bot 连接后同步白名单群历史。
   - [`record_handler`](#record-handler)注册被动记录器；[`record_chat_history()`](#fn-record-chat-history)保存普通群消息。
   - [`chat_handler`](#chat-handler)注册 `@机器人` 处理器；[`handle_ai_chat()`](#fn-handle-ai-chat)完成入口校验、业务调用、回复和异常分流。
@@ -692,14 +695,14 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 当 `ENABLE_AI_HISTORY_DECISION=True`：
 
 1. 统计最近 10 分钟、10～30 分钟、30～60 分钟、1～2 小时、2～4 小时和 4～6 小时的消息量。
-2. 把当前消息的 AI 富文本表示附在评估提示中，用于判断新话题、指代、引用和对前文的依赖程度。
+2. 把当前消息的 AI 富文本表示附在评估提示中，并在提示词中告知当前时间，用于让前置模型正确判断新话题、指代、引用（特别是引用回复中出现的具体时间）和对前文的依赖程度。
 3. 当前消息只作为待评估数据，提示明确禁止执行其中的指令。前置模型只接收富文本字符串，不附带图片或其他视觉输入。
 4. 让 `DYNAMIC_HISTORY_MODEL` 只回复一个数字。
 5. OpenAI 使用简化的 `messages` 请求；Gemini 使用 `contents/parts`。
 6. 从正文中提取第一个数字，再将结果限制到 50～500。
 7. 非 200、异常或无数字均返回 80。
 
-前置模型只决定条数：它不读取历史群聊正文，仅接收 6 小时分段计数和当前消息富文本。该统计窗口不会限制正式上下文的时间范围；正式历史仍按前置模型返回的最近 50～500 条读取。
+前置模型只决定条数：它不读取历史群聊正文，仅接收 6 小时分段计数、当前消息富文本和当前时间。该统计窗口不会限制正式上下文的时间范围；正式历史仍按前置模型返回的最近 50～300 条读取。
 
 <a id="class-onebot-message-parser"></a>
 
@@ -935,7 +938,7 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 | 场景 | 入口 | 规则 |
 |---|---|---|
 | Bot 连接后的历史同步 | `sync_history_on_startup()` | 每条历史分别解析和插入 |
-| 普通白名单群消息 | `record_chat_history()` | 跳过 `@机器人`，防止与 AI Handler 竞争 |
+| 普通白名单群消息 | `record_chat_history()` | `is_message_to_bot()` 为真时跳过，防止与 AI Handler 竞争 |
 | 触发 AI 的用户消息 | `handle_ai_chat()` | 在任何模型调用前先强制保存 |
 | `Waiting……` 快速回复 | `send_and_save()` | 发送成功且获得 `message_id` 才保存 |
 | 正式回复或错误提示 | `send_and_save()` | 同上 |
@@ -1472,9 +1475,23 @@ Base64 数据属于协议附件，不会直接拼进模型看到的文本。若 
 
 模块加载时创建一个 `ChatService` 实例，供 `handle_ai_chat()` 复用；服务对象本身不保存单次对话状态。
 
+<a id="fn-is-message-to-bot"></a>
+
+### 14.2 `is_message_to_bot()`
+
+事件入口层共享的触发判定规则，`record_chat_history()` 与 `chat_handler` 共用：
+
+- 仅在群聊事件上生效；私聊/非消息事件返回 `False`。
+- 遍历消息段，存在 `at` 段且 `qq == bot.self_id` 时返回 `True`（与图片等段的前后顺序无关）。
+- 消息纯文本中提及机器人昵称 `_bot_nickname` 时返回 `True`。
+- 遍历/解析异常时返回 `False`，不影响其它规则。
+
+不使用 `to_me()` / `event.to_me`：部分场景（如图片在前、`@` 在后）下服务端计算的
+`to_me` 不可靠，会导致机器人无法被触发，因此改为直接从消息段判断。
+
 <a id="fn-sync-history-on-startup"></a>
 
-### 14.2 `sync_history_on_startup()`
+### 14.3 `sync_history_on_startup()`
 
 注册在 `driver.on_bot_connect`：
 
@@ -1491,7 +1508,7 @@ Base64 数据属于协议附件，不会直接拼进模型看到的文本。若 
 
 <a id="record-handler"></a>
 
-### 14.3 `record_handler` 与 `record_chat_history()`
+### 14.4 `record_handler` 与 `record_chat_history()`
 
 <a id="fn-record-chat-history"></a>
 
@@ -1499,16 +1516,16 @@ Base64 数据属于协议附件，不会直接拼进模型看到的文本。若 
 
 - 非群消息跳过。
 - 非白名单群跳过。
-- `event.is_tome()` 跳过，避免和 AI Handler 重复处理触发消息。
+- `is_message_to_bot()` 为真时跳过，避免和 AI Handler 重复处理触发消息。
 - 保存昵称、群名片、用户 ID 和规范化消息。
 
 <a id="chat-handler"></a>
 
-### 14.4 `chat_handler` 与 `handle_ai_chat()`
+### 14.5 `chat_handler` 与 `handle_ai_chat()`
 
 <a id="fn-handle-ai-chat"></a>
 
-`rule=to_me(), priority=50, block=True`，主处理流程：
+`rule=is_message_to_bot(), priority=50, block=True`，主处理流程：
 
 1. 私聊等非群消息：回复“仅限群聊”并结束。
 2. 非白名单群：直接返回。

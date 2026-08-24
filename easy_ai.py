@@ -46,7 +46,7 @@ MODELS_CONFIG = {
         "api_url": "https://api.deepseek.com/chat/completions",
         "name": "ds-v4-flash",
         "api_type": "openai",
-        "model_id": "deepseek-v4-flash",  # DeepSeek 需要在 body 传入这个
+        "model_id": "deepseek-v4-flash-vision-exp",  # DeepSeek 需要在 body 传入这个
         "vision": False,
         "search": False
     },
@@ -472,6 +472,10 @@ async def init_db():
                     content TEXT
                 )
             ''')
+            # 为 timestamp 建立索引，加速按时间过滤/排序的查询（历史记录可能达数百万条）
+            await db.execute(
+                f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_timestamp" ON "{table_name}" (timestamp)'
+            )
 
         await db.commit()
     logger.info("[AI Chat] 数据库初始化完成")

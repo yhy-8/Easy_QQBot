@@ -158,7 +158,7 @@ ENABLE_AI_HISTORY_DECISION = True  # AI 动态决定历史记录条数 (True/Fal
 DYNAMIC_HISTORY_MODEL = "default"  # 决定上下文条数所用的模型 (对应 MODELS_CONFIG 键名)
 DYNAMIC_HISTORY_TIMEOUT = 30       # 前置AI超时时间（秒）
 AI_CHAT_TIMEOUT = 120              # 正式聊天中每次模型请求的超时时间（秒）
-CONTEXT_CACHE_WINDOW = 3600        # 会话延续窗口（秒）：该时长内存在 bot 对话则延续会话并增量追加（默认 1800，即 30 分钟）
+CONTEXT_CACHE_WINDOW = 3600        # 会话延续窗口（秒）：该时长内存在 bot 对话则延续会话并增量追加（默认 3600，即 1 小时）
 
 IMAGE_BASE_DIR = ""                # 图片缓存目录。同机部署留空；跨Docker填挂载路径
 DEFAULT_MODE = "casual"            # 无前缀默认模式："serious"(严肃) 或 "casual"(随性)

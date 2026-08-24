@@ -2,7 +2,7 @@
 
 > 文档目的：帮助维护者快速理解 `easy_ai.py` 的整体结构、完整调用链、数据库不变量、消息格式、模型协议、搜索行为和异常边界。  
 > 对应代码：当前单文件版 `easy_ai.py`。  
-> 最后同步时间：2026-08-24 22:00（Asia/Shanghai）。
+> 最后同步时间：2026-08-25 01:10（Asia/Shanghai）。
 
 ## 1. 项目定位与设计约束
 
@@ -288,7 +288,7 @@ NoneBot / OneBot 事件
 |---|---|---|
 | `ALLOWED_GROUPS` | 允许记录和使用 AI 的群号列表 | 每个群对应一张 `group_{group_id}` 表 |
 | `DB_PATH` | SQLite 文件路径 | 初始化、查询和写入都使用同一路径 |
-| `ENABLE_QUICK_ACK` | 是否先回复 `Waiting……` | 快速回复也会在发送成功后存库 |
+| `ENABLE_QUICK_ACK` | 是否先回复 `Waiting……` | 快速回复只发送、不写入聊天库（见 §7.2 数据库不变量） |
 | `ENABLE_AI_HISTORY_DECISION` | 是否让前置 AI 决定历史条数 | 关闭后使用纯统计随机算法 |
 | `DYNAMIC_HISTORY_MODEL` | 前置 AI 使用的模型键 | 不存在时沿用原逻辑回退 `default` |
 | `DYNAMIC_HISTORY_TIMEOUT` | 前置 AI 请求超时 | 超时或回包无数字时使用默认 80 条 |
@@ -724,14 +724,16 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 ### 7.2 会话延续与增量追加
 
-前置动态决策只在「新对话」时触发。`_group_session`（键为群号）保存每个群的会话状态，字段包括：`active`（基础历史是否已固定）、`base_rows`（已固定的基础历史行，原样保留）、`cutoff_ts` 与 `cutoff_rowid`（已纳入上下文的最新一条历史的时间戳与 rowid，作为增量边界）、`last_bot_ts`（最近一次 bot 参与对话的时间）。
+前置动态决策只在「新对话」时触发。`_group_session`（键为群号）保存每个群的会话状态，字段包括：`active`（基础历史是否已固定）、`base_rows`（已纳入上下文的历史行，随会话**持续累积**）、`cutoff_ts` 与 `cutoff_rowid`（已纳入上下文的最新一条历史的时间戳与 rowid，作为增量边界）、`last_bot_ts`（最近一次 bot 参与对话的时间）。
 
-`build_prompts()` 用 `_should_extend_conversation()`（会话保持 `active`，且 `now - last_bot_ts ≤ CONTEXT_CACHE_WINDOW`，默认 1800 秒即 30 分钟，可在顶部配置区调整）判断：
+`build_prompts()` 用 `_should_extend_conversation()`（会话保持 `active`，且 `now - last_bot_ts ≤ CONTEXT_CACHE_WINDOW`，默认 3600 秒即 1 小时，可在顶部配置区调整）判断：
 
-- **延续会话**：不调用前置决策；`base_rows` 保持不变，仅通过 `_load_rows_after()` 追加位于边界 `(cutoff_ts, cutoff_rowid)` 之后的新增群消息，按时间升序、不设上限，并把边界推进到最新一条已纳入的消息。
-- **新对话**（30 分钟内无 bot 对话）：调用 `get_dynamic_history_length()` 决定条数并加载基础历史，把结果固定为 `base_rows`，建立会话并记录 `last_bot_ts`。
+- **延续会话**：不调用前置决策；通过 `_load_rows_after()` 读取严格位于边界 `(cutoff_ts, cutoff_rowid)` 之后的新增群消息（按时间升序、不设上限，含 bot 回复期间其它成员新发的消息），**永久并入 `base_rows`**（`base_rows += 增量`），再把边界推进到最新一条已纳入的消息。每次请求的历史都是上一次历史的前缀延伸，因此前缀逐 token 一致以命中上下文缓存。
+- **新对话**（窗口内无 bot 对话）：调用 `get_dynamic_history_length()` 决定条数并加载基础历史，重置并固定为 `base_rows`，建立会话并记录 `last_bot_ts`。
 
-由于延续会话中基础历史前缀逐次逐 token 保持一致，可形成连续的前缀缓存；`history_count` 为固定基础与增量追加的总行数。使用 `(timestamp, rowid)` 作为边界，可避免同秒消息被遗漏或重复。
+延续会话期间 `history_count` 为累计的 `base_rows` 总行数（每回合递增约“1 问+1 答”）。使用 `(timestamp, rowid)` 作为边界，可避免同秒消息被遗漏或重复。
+
+**数据库不变量（会话延续的正确性前提）：** bot 的快速回复「（模型信息）Waiting……」**不写入**聊天库 —— `send_and_save()` 仅在 `is_finish=True`（正式回复/提示）时入库。若把「Waiting」也入库，它会在 build 时成为最新行、把边界推进到用户提问之后，导致后续各回合的用户提问被永久跳过，并把伪记录计入记录数。
 
 <a id="class-onebot-message-parser"></a>
 
@@ -921,7 +923,7 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 4. 本函数不自行结束循环；由外层 `asyncio.wait_for` 以 `SEND_RETRY_TIMEOUT`（默认 10 秒）超时取消，超时视为发送失败（典型场景：敏感词被 NapCat 拦截，单次发送需约 10 秒才返回失败）。
 5. 被超时取消后由调用方决定后续（改发备用提示或放弃）。
 
-`send_and_save()` 对正式回复、`Waiting……` 快速回复和错误提示统一使用本函数，不区分 `is_finish`。
+`send_and_save()` 对正式回复、`Waiting……` 快速回复和错误提示统一发送，但**仅 `is_finish=True`（正式回复/提示）时才写入聊天库**；`Waiting……` 快速回复（`is_finish=False`）只发送不入库（见 §7.2 数据库不变量）。
 
 <a id="fn-send-and-save"></a>
 
@@ -931,7 +933,7 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 1. 调用 `_send_loop()`（见 9.1）并用 `asyncio.wait_for(..., timeout=SEND_RETRY_TIMEOUT)` 统一收口发送所有消息，不区分 `is_finish`；快速失败立即重发，超过超时判定为失败。
 2. 发送超时/彻底失败且调用方提供了 `fallback_msg`（仅正式 AI 回复）时，改发备用提示（同样受 `SEND_RETRY_TIMEOUT` 超时收口）；备用提示也失败才最终放弃，不存库、无更多输出。
-3. 只有返回字典且带 `message_id` 时才尝试存库，存库内容跟随实际送达的消息（原回复或备用提示）。
+3. 仅当 `is_finish=True`（正式回复/提示）且返回字典带 `message_id` 时才尝试存库；`Waiting……` 快速回复（`is_finish=False`）只发送不入库。存库内容跟随实际送达的消息（原回复或备用提示）。
 4. 机器人身份优先从登录信息和群成员信息获取。
 5. 身份查询失败时回退 `AI助手` 和 `bot.self_id`。
 6. 使用数据库消息解析器规范化机器人发出的 `MessageSegment`。
@@ -969,7 +971,7 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 | Bot 连接后的历史同步 | `sync_history_on_startup()` | 每条历史分别解析和插入 |
 | 普通白名单群消息 | `record_chat_history()` | `is_message_to_bot()` 为真时跳过，防止与 AI Handler 竞争 |
 | 触发 AI 的用户消息 | `handle_ai_chat()` | 在任何模型调用前先强制保存 |
-| `Waiting……` 快速回复 | `send_and_save()` | 发送成功且获得 `message_id` 才保存 |
+| `Waiting……` 快速回复 | `send_and_save()` | 只发送，**不写入聊天库**（见 §7.2 数据不变量） |
 | 正式回复或错误提示 | `send_and_save()` | 同上 |
 | 正式回复被拦截 | `send_and_save()` | 原回复彻底发送失败后改发备用提示（保留 `@` 与消息头，正文替换为“（回复被拦截，发送失败）”） |
 
@@ -1333,7 +1335,7 @@ QQ 昵称不同时显示 `群名片（QQ昵称：昵称）`，相同时只显示
 
 1. 生成当前本地时间。
 2. 组合当前提问者的群名片和 QQ 昵称。
-3. 查询该群会话状态 `_get_group_session(group_id)`：若设定时间内有 bot 对话且基础历史已固定，则进入**延续会话**模式——不再调用前置 AI，固定保留上一次选定的基础历史，只把 (cutoff_timestamp, cutoff_rowid) 之后的新增群消息增量追加到末尾（不设上限，避免长会话被截断破坏前缀缓存一致性）；否则视为**新对话**，将当前消息富文本传给动态历史决策（固定算法/前置 AI）决定条数，并把结果作为本会话的基础历史固定下来。
+3. 查询该群会话状态 `_get_group_session(group_id)`：若设定时间内有 bot 对话且基础历史已固定，则进入**延续会话**模式——不再调用前置 AI，读取 (cutoff_timestamp, cutoff_rowid) 之后的新增群消息并**永久并入基础历史**（每次请求前缀是上次的前缀延伸以命中缓存，不设上限）；否则视为**新对话**，将当前消息富文本传给动态历史决策（固定算法/前置 AI）决定条数，并把结果作为本会话的基础历史固定下来。
 4. 查询基础历史（新对话）或增量追加历史（延续会话）并生成昵称映射。
 5. 格式化历史文本。
 6. 查询机器人在当前群的名片，失败时使用启动时取得的 QQ 昵称。
@@ -1569,7 +1571,7 @@ Base64 数据属于协议附件，不会直接拼进模型看到的文本。若 
 7. 从富文本删除一次模型前缀。
 8. 空文本且无图片：回复“何意味”。
 9. 有图片但模型不支持视觉：回复能力错误。
-10. 若开启快速提示：发送并保存 `Waiting……`。
+10. 若开启快速提示：发送 `Waiting……`（仅发送，**不入库**，见 §7.2 数据不变量）。
 11. 调用 `chat_service.complete()`。
 12. 构建固定回复头。
 13. `@` 提问者，发送正式回复并保存。

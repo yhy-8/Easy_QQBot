@@ -944,7 +944,10 @@ async def send_and_save(bot: Bot, event: GroupMessageEvent, matcher, msg, is_fin
         if send_result is not None:
             sent_msg = fallback_msg
 
-    if isinstance(send_result, dict) and "message_id" in send_result:
+    # 仅把“正式回复/提示消息”入库；快速回复“Waiting……”不入库，
+    # 否则它会在会话延续时被当成最新边界，导致用户提问被永久跳过
+    # 且把伪记录计入历史条数（记录数统计错误）。
+    if is_finish and isinstance(send_result, dict) and "message_id" in send_result:
         try:
             content_to_save = await parse_message_content(bot, event.group_id, sent_msg)
             bot_msg_id = send_result["message_id"]
@@ -1888,13 +1891,16 @@ class ChatService:
         sess["last_bot_ts"] = int(datetime.datetime.now().timestamp())
 
         if extend:
-            # 半小时内有 bot 对话：固定基础历史，只增量追加新消息（不设上限）
-            rows = sess["base_rows"] + await _load_rows_after(
+            # 半小时内有 bot 对话：把增量新消息永久并入 base_rows，
+            # 使历史随会话持续累积（每次请求前缀是上一次的前缀延伸，
+            # 从而命中上下文缓存）；否则只取单次增量会导致早期回合被丢弃。
+            sess["base_rows"] = sess["base_rows"] + await _load_rows_after(
                 event.group_id,
                 event.message_id,
                 sess["cutoff_ts"],
                 sess["cutoff_rowid"]
             )
+            rows = sess["base_rows"]
         else:
             # 半小时内无 bot 对话：视为新对话，调用前置 AI 决定条数并固定基础历史
             dynamic_limit = await get_dynamic_history_length(

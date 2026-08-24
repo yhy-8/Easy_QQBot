@@ -24,6 +24,7 @@ DYNAMIC_HISTORY_MODEL = "default"   # 决定上下文条数的模型标识 (对�
 DYNAMIC_HISTORY_TIMEOUT = 30  # 动态决定历史记录条数(前置AI)的超时时间（秒）
 AI_CHAT_TIMEOUT = 120         # 正式聊天(正式AI)的超时时间（秒）
 SEND_RETRY_TIMEOUT = 10       # 单条消息发送总超时（秒）：期间无限重发，超时判定为发送失败（如敏感词被拦截）
+CONTEXT_CACHE_WINDOW = 3600   # 会话延续窗口（秒）：该时长内存在 bot 对话则延续会话并增量追加，不重新决策
 
 # 图片本地缓存目录配置
 # 1. 如果代码和 NapCat 在同一台电脑/同一个 Docker 容器内，请保持留空 ""，程序会自动读取绝对路径。
@@ -1662,7 +1663,7 @@ async def _load_history_rows(group_id: int, message_id, dynamic_limit: int) -> l
     try:
         async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
             query = f'''
-                SELECT g.timestamp, u.qq_nickname, ug.group_nickname, g.content
+                SELECT g.timestamp, u.qq_nickname, ug.group_nickname, g.content, g.rowid
                 FROM "{table_name}" g
                 LEFT JOIN user_info u ON g.user_id = u.user_id
                 LEFT JOIN user_group_info ug ON g.user_id = ug.user_id AND ug.group_id = ?
@@ -1679,6 +1680,65 @@ async def _load_history_rows(group_id: int, message_id, dynamic_limit: int) -> l
         logger.exception(f"[AI Chat]数据库提取异常： {e}")
         rows = []
     rows.reverse()
+    return rows
+
+
+# ========== 连续对话会话：固定基础历史 + 仅增量追加（高上下文缓存） ==========
+# 触发思路：半小时内存在 bot 对话时，不再让前置 AI 重新判断条数，而是固定上一
+# 次已选定的基础历史，只把其间新增的群消息增量追加到末尾。这样正式请求的历史前缀
+# 逐次保持逐 token 一致，从而命中供应商的上下文缓存，前置 AI 长会话只触发一次。
+# 同时增量追加不设上限，避免长会话被截断破坏前缀一致性（极端情况也几乎不会超过3000条
+# ，仍然更便宜）。窗口时长由配置 CONTEXT_CACHE_WINDOW 决定。
+_group_session = {}  # group_id -> 会话状态
+
+
+def _get_group_session(group_id: int) -> dict:
+    sess = _group_session.get(group_id)
+    if sess is None:
+        sess = {
+            "active": False,   # 基础历史是否已固定
+            "base_rows": [],   # 已固定的基础历史行（原样保留，不再变化）
+            "cutoff_ts": 0,    # 已纳入上下文的最新一条历史时间戳（增量边界）
+            "cutoff_rowid": 0, # 与 cutoff_ts 配套的 rowid，精确定位增量边界（防同秒丢/重）
+            "last_bot_ts": 0,  # 最近一次 bot 参与对话的时间
+        }
+        _group_session[group_id] = sess
+    return sess
+
+
+def _should_extend_conversation(group_id: int) -> bool:
+    """窗口内有 bot 对话且基础历史已固定 → 延续会话只做增量追加。"""
+    sess = _get_group_session(group_id)
+    now_ts = int(datetime.datetime.now().timestamp())
+    return sess["active"] and (now_ts - sess["last_bot_ts"] <= CONTEXT_CACHE_WINDOW)
+
+
+async def _load_rows_after(
+        group_id: int, message_id, cutoff_ts: int, cutoff_rowid: int
+) -> list:
+    """读取严格位于 (cutoff_ts, cutoff_rowid) 之后的新消息
+    （增量追加，不设上限，按时间升序；用 rowid 精确定位以防同秒丢/重）。"""
+    table_name = f"group_{group_id}"
+    rows = []
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=15.0) as db:
+            query = f'''
+                SELECT g.timestamp, u.qq_nickname, ug.group_nickname, g.content, g.rowid
+                FROM "{table_name}" g
+                LEFT JOIN user_info u ON g.user_id = u.user_id
+                LEFT JOIN user_group_info ug ON g.user_id = ug.user_id AND ug.group_id = ?
+                WHERE g.message_id != ?
+                  AND (g.timestamp > ? OR (g.timestamp = ? AND g.rowid > ?))
+                ORDER BY g.timestamp ASC, g.rowid ASC
+            '''
+            async with db.execute(
+                    query,
+                    (group_id, str(message_id), cutoff_ts, cutoff_ts, cutoff_rowid)
+            ) as cursor:
+                rows = await cursor.fetchall()
+    except Exception as e:
+        logger.exception(f"[AI Chat]数据库增量提取异常： {e}")
+        rows = []
     return rows
 
 
@@ -1822,15 +1882,36 @@ class ChatService:
         else:
             user_name = group_nickname
 
-        dynamic_limit = await get_dynamic_history_length(
-            event.group_id,
-            current_message=user_input
-        )
-        rows = await _load_history_rows(
-            event.group_id,
-            event.message_id,
-            dynamic_limit
-        )
+        sess = _get_group_session(event.group_id)
+        extend = _should_extend_conversation(event.group_id)
+        # 本次为“有 bot 参与的对话”，用于判定下一次是否延续缓存会话
+        sess["last_bot_ts"] = int(datetime.datetime.now().timestamp())
+
+        if extend:
+            # 半小时内有 bot 对话：固定基础历史，只增量追加新消息（不设上限）
+            rows = sess["base_rows"] + await _load_rows_after(
+                event.group_id,
+                event.message_id,
+                sess["cutoff_ts"],
+                sess["cutoff_rowid"]
+            )
+        else:
+            # 半小时内无 bot 对话：视为新对话，调用前置 AI 决定条数并固定基础历史
+            dynamic_limit = await get_dynamic_history_length(
+                event.group_id,
+                current_message=user_input
+            )
+            rows = await _load_history_rows(
+                event.group_id,
+                event.message_id,
+                dynamic_limit
+            )
+            sess["base_rows"] = rows
+            sess["active"] = True
+        if rows:
+            sess["cutoff_ts"] = rows[-1][0]
+            sess["cutoff_rowid"] = rows[-1][4]
+
         user_display_map = await _load_user_display_map(event.group_id)
         history_text = _format_history_text(rows, user_display_map)
 

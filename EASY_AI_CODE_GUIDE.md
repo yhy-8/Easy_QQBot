@@ -2,7 +2,7 @@
 
 > 文档目的：帮助维护者快速理解 `easy_ai.py` 的整体结构、完整调用链、数据库不变量、消息格式、模型协议、搜索行为和异常边界。  
 > 对应代码：当前单文件版 `easy_ai.py`。  
-> 最后同步时间：2026-08-24 20:35（Asia/Shanghai）。
+> 最后同步时间：2026-08-24 22:00（Asia/Shanghai）。
 
 ## 1. 项目定位与设计约束
 
@@ -103,6 +103,13 @@ easy_ai.py
 │  │  ├─ convert_reply_time()
 │  │  └─ convert_at()
 │  └─ _format_reply_prefix()
+│
+├─ 会话延续与增量追加
+│  ├─ CONTEXT_CACHE_WINDOW（顶部配置）
+│  ├─ _group_session
+│  ├─ _get_group_session()
+│  ├─ _should_extend_conversation()
+│  └─ _load_rows_after()
 │
 ├─ ChatService
 │  ├─ select_model()
@@ -232,10 +239,16 @@ NoneBot / OneBot 事件
   - [`_execute_web_search()`](#fn-execute-web-search)校验并执行一批工具调用。
   - [`_run_openai_third_search_workflow()`](#fn-run-openai-third-search-workflow)管理多轮搜索和最后强制回答。
 - 历史读取与回复头
-  - [`_load_history_rows()`](#fn-load-history-rows)查询、排除当前消息并恢复旧到新顺序。
+  - [`_load_history_rows()`](#fn-load-history-rows)查询、排除当前消息并恢复旧到新顺序（返回含 `rowid`，用于精确定位增量边界）。
   - [`_load_user_display_map()`](#fn-load-user-display-map)生成群名片/QQ 昵称映射。
   - [`_format_history_text()`](#fn-format-history-text)格式化历史；内部 [`convert_reply_time()`](#local-convert-reply-time)处理引用，[`convert_at()`](#local-convert-at)处理数字 `@`。
   - [`_format_reply_prefix()`](#fn-format-reply-prefix)生成固定正式回复头。
+- 会话延续与增量追加
+  - `CONTEXT_CACHE_WINDOW`（顶部配置项）定义延续会话的时间窗口，可在配置区修改。
+  - `_group_session` 按群号保存会话状态。
+  - [`_get_group_session()`](#fn-get-group-session)首次按群初始化并返回会话状态。
+  - [`_should_extend_conversation()`](#fn-should-extend-conversation)判断当前是否属于可延续会话。
+  - [`_load_rows_after()`](#fn-load-rows-after)读取位于增量边界之后的新增群消息。
 - `ChatService` 业务编排
   - [`select_model()`](#method-chat-service-select-model)解析模型前缀和模式。
   - [`resolve_visuals()`](#method-chat-service-resolve-visuals)并行解析图片。
@@ -705,7 +718,20 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 6. 从正文中提取第一个数字，再将结果限制到 50～500。
 7. 非 200、异常或无数字均返回 80。
 
-前置模型只决定条数：它不读取历史群聊正文，仅接收 6 小时分段计数、当前消息富文本和当前时间。该统计窗口不会限制正式上下文的时间范围；正式历史仍按前置模型返回的最近 50～300 条读取。
+前置模型只决定条数：它不读取历史群聊正文，仅接收 6 小时分段计数、当前消息富文本和当前时间。该统计窗口不会限制正式上下文的时间范围。
+
+<a id="session-extend"></a>
+
+### 7.2 会话延续与增量追加
+
+前置动态决策只在「新对话」时触发。`_group_session`（键为群号）保存每个群的会话状态，字段包括：`active`（基础历史是否已固定）、`base_rows`（已固定的基础历史行，原样保留）、`cutoff_ts` 与 `cutoff_rowid`（已纳入上下文的最新一条历史的时间戳与 rowid，作为增量边界）、`last_bot_ts`（最近一次 bot 参与对话的时间）。
+
+`build_prompts()` 用 `_should_extend_conversation()`（会话保持 `active`，且 `now - last_bot_ts ≤ CONTEXT_CACHE_WINDOW`，默认 1800 秒即 30 分钟，可在顶部配置区调整）判断：
+
+- **延续会话**：不调用前置决策；`base_rows` 保持不变，仅通过 `_load_rows_after()` 追加位于边界 `(cutoff_ts, cutoff_rowid)` 之后的新增群消息，按时间升序、不设上限，并把边界推进到最新一条已纳入的消息。
+- **新对话**（30 分钟内无 bot 对话）：调用 `get_dynamic_history_length()` 决定条数并加载基础历史，把结果固定为 `base_rows`，建立会话并记录 `last_bot_ts`。
+
+由于延续会话中基础历史前缀逐次逐 token 保持一致，可形成连续的前缀缓存；`history_count` 为固定基础与增量追加的总行数。使用 `(timestamp, rowid)` 作为边界，可避免同秒消息被遗漏或重复。
 
 <a id="class-onebot-message-parser"></a>
 
@@ -1307,8 +1333,8 @@ QQ 昵称不同时显示 `群名片（QQ昵称：昵称）`，相同时只显示
 
 1. 生成当前本地时间。
 2. 组合当前提问者的群名片和 QQ 昵称。
-3. 将当前消息富文本传给动态历史决策，由固定算法或前置模型决定历史条数。
-4. 查询历史记录并生成昵称映射。
+3. 查询该群会话状态 `_get_group_session(group_id)`：若设定时间内有 bot 对话且基础历史已固定，则进入**延续会话**模式——不再调用前置 AI，固定保留上一次选定的基础历史，只把 (cutoff_timestamp, cutoff_rowid) 之后的新增群消息增量追加到末尾（不设上限，避免长会话被截断破坏前缀缓存一致性）；否则视为**新对话**，将当前消息富文本传给动态历史决策（固定算法/前置 AI）决定条数，并把结果作为本会话的基础历史固定下来。
+4. 查询基础历史（新对话）或增量追加历史（延续会话）并生成昵称映射。
 5. 格式化历史文本。
 6. 查询机器人在当前群的名片，失败时使用启动时取得的 QQ 昵称。
 7. 用机器人身份填充模式提示词。

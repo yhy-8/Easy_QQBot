@@ -1891,9 +1891,9 @@ class ChatService:
         sess["last_bot_ts"] = int(datetime.datetime.now().timestamp())
 
         if extend:
-            # 半小时内有 bot 对话：把增量新消息永久并入 base_rows，
+            # 设定时间内有 bot 对话：把增量新消息永久并入 base_rows，
             # 使历史随会话持续累积（每次请求前缀是上一次的前缀延伸，
-            # 从而命中上下文缓存）；否则只取单次增量会导致早期回合被丢弃。
+            # 从而命中上下文缓存）。
             sess["base_rows"] = sess["base_rows"] + await _load_rows_after(
                 event.group_id,
                 event.message_id,

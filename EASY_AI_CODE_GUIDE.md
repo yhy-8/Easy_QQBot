@@ -722,18 +722,36 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 <a id="session-extend"></a>
 
-### 7.2 会话延续与增量追加
+### 7.2 会话延续与增量追加（总览）
 
-前置动态决策只在「新对话」时触发。`_group_session`（键为群号）保存每个群的会话状态，字段包括：`active`（基础历史是否已固定）、`base_rows`（已纳入上下文的历史行，随会话**持续累积**）、`cutoff_ts` 与 `cutoff_rowid`（已纳入上下文的最新一条历史的时间戳与 rowid，作为增量边界）、`last_bot_ts`（最近一次 bot 参与对话的时间）。
+前置动态决策只在「新对话」时触发。每个群在 `_group_session` 中保存独立会话状态，字段包括：`active`（基础历史是否已固定）、`base_rows`（已纳入上下文的历史行，随会话**持续累积**）、`cutoff_ts` 与 `cutoff_rowid`（已纳入上下文的最新一条历史的时间戳与 rowid，作为增量边界）、`last_bot_ts`（最近一次 bot 参与对话的时间）。
 
-`build_prompts()` 用 `_should_extend_conversation()`（会话保持 `active`，且 `now - last_bot_ts ≤ CONTEXT_CACHE_WINDOW`，默认 3600 秒即 1 小时，可在顶部配置区调整）判断：
+由 [`_should_extend_conversation()`](#fn-should-extend-conversation) 判断本次可否延续：
 
-- **延续会话**：不调用前置决策；通过 `_load_rows_after()` 读取严格位于边界 `(cutoff_ts, cutoff_rowid)` 之后的新增群消息（按时间升序、不设上限，含 bot 回复期间其它成员新发的消息），**永久并入 `base_rows`**（`base_rows += 增量`），再把边界推进到最新一条已纳入的消息。每次请求的历史都是上一次历史的前缀延伸，因此前缀逐 token 一致以命中上下文缓存。
-- **新对话**（窗口内无 bot 对话）：调用 `get_dynamic_history_length()` 决定条数并加载基础历史，重置并固定为 `base_rows`，建立会话并记录 `last_bot_ts`。
+- **延续会话**：不调用前置决策；通过 [`_load_rows_after()`](#fn-load-rows-after) 读取严格位于边界 `(cutoff_ts, cutoff_rowid)` 之后的新增群消息（按时间升序、不设上限，含 bot 回复期间其它成员新发的消息），**永久并入 `base_rows`**（`base_rows += 增量`），再把边界推进到最新一条已纳入的消息。每次请求的历史都是上一次历史的前缀延伸，因此前缀逐 token 一致以命中上下文缓存。
+- **新对话**（窗口内无 bot 对话）：调用 [`get_dynamic_history_length()`](#fn-get-dynamic-history-length) 决定条数并加载基础历史，重置并固定为 `base_rows`，建立会话并记录 `last_bot_ts`。
 
 延续会话期间 `history_count` 为累计的 `base_rows` 总行数（每回合递增约“1 问+1 答”）。使用 `(timestamp, rowid)` 作为边界，可避免同秒消息被遗漏或重复。
 
-**数据库不变量（会话延续的正确性前提）：** bot 的快速回复「（模型信息）Waiting……」**不写入**聊天库 —— `send_and_save()` 仅在 `is_finish=True`（正式回复/提示）时入库。若把「Waiting」也入库，它会在 build 时成为最新行、把边界推进到用户提问之后，导致后续各回合的用户提问被永久跳过，并把伪记录计入记录数。
+**数据库不变量（会话延续的正确性前提）：** bot 的快速回复「（模型信息）Waiting……」**不写入**聊天库 —— `send_and_save()` 仅在 `is_finish=True`（正式回复/提示）时入库。若把「Waiting」也入库，它会被当作一条真实聊天记录混入 `base_rows`，既污染模型看到的历史前缀，也会把 `history_count`（界面显示“记录：N”）虚增一条（每回合多计 1 条伪记录），违背“只统计真实聊天记录”的预期。因此快速回复只发送、不入库。
+
+<a id="fn-get-group-session"></a>
+
+### 7.3 `_get_group_session()`
+
+返回指定群的会话状态字典；若该群尚未建立会话，则初始化一份默认状态（`active=False`，`base_rows`、`cutoff_ts`、`cutoff_rowid`、`last_bot_ts` 归零）登记到 `_group_session` 后再返回。`_group_session` 是模块级全局字典，仅进程内有效——重启后清空，会话回到「新对话」。
+
+<a id="fn-should-extend-conversation"></a>
+
+### 7.4 `_should_extend_conversation()`
+
+延续判断：返回 `active` 为真且 `now - last_bot_ts ≤ CONTEXT_CACHE_WINDOW`（默认 3600 秒即 1 小时，可在顶部配置区调整）。`active` 仅在「新对话」分支置真；窗口过期或进程重启后，会话回归「新对话」重新决策。
+
+<a id="fn-load-rows-after"></a>
+
+### 7.5 `_load_rows_after()`
+
+增量读取：查询严格位于边界 `(cutoff_ts, cutoff_rowid)` 之后的新增群消息（按时间升序、不设上限），用于延续会话追加。排除当前触发消息（`message_id != 当前`），条件为 `timestamp > cutoff_ts OR (timestamp = cutoff_ts AND rowid > cutoff_rowid)`；以 `(timestamp, rowid)` 双键定位，避免同秒消息被遗漏或重复。
 
 <a id="class-onebot-message-parser"></a>
 

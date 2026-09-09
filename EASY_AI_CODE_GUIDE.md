@@ -239,7 +239,7 @@ NoneBot / OneBot 事件
   - [`_execute_web_search()`](#fn-execute-web-search)校验并执行一批工具调用。
   - [`_run_openai_third_search_workflow()`](#fn-run-openai-third-search-workflow)管理多轮搜索和最后强制回答。
 - 历史读取与回复头
-  - [`_load_history_rows()`](#fn-load-history-rows)查询、排除当前消息并恢复旧到新顺序（返回含 `rowid`，用于精确定位增量边界）；读取上界为本次提问的 `rowid`。
+  - [`_load_history_rows()`](#fn-load-history-rows)按 `rowid` 取最近若干条并排除当前消息（返回含 `rowid`，作为增量下界）；读取上界为本次提问的 `rowid`。
   - [`_load_user_display_map()`](#fn-load-user-display-map)生成群名片/QQ 昵称映射。
   - [`_format_history_text()`](#fn-format-history-text)格式化历史；内部 [`convert_reply_time()`](#local-convert-reply-time)处理引用，[`convert_at()`](#local-convert-at)处理数字 `@`。
   - [`_format_reply_prefix()`](#fn-format-reply-prefix)生成固定正式回复头。
@@ -724,14 +724,14 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 ### 7.2 会话延续与增量追加（总览）
 
-前置动态决策只在「新对话」时触发。每个群在 `_group_session` 中保存独立会话状态，字段包括：`active`（基础历史是否已固定）、`base_rows`（已纳入上下文的历史行，随会话**持续累积**）、`cutoff_ts` 与 `cutoff_rowid`（已纳入上下文的最新一条历史的时间戳与 rowid，作为增量边界）、`last_bot_ts`（最近一次 bot 参与对话的时间）。
+前置动态决策只在「新对话」时触发。每个群在 `_group_session` 中保存独立会话状态，字段包括：`active`（基础历史是否已固定）、`base_rows`（已纳入上下文的历史行，随会话**持续累积**）、`watermark_rowid`（已纳入 `base_rows` 的最大 `rowid`，作为增量下界）、`last_bot_ts`（最近一次 bot 参与对话的时间）。
 
 由 [`_should_extend_conversation()`](#fn-should-extend-conversation) 判断本次可否延续：
 
-- **延续会话**：不调用前置决策；通过 [`_load_rows_after()`](#fn-load-rows-after) 读取严格位于边界 `(cutoff_ts, cutoff_rowid)` 之后的新增群消息（按时间升序、不设上限，含 bot 回复期间其它成员新发的消息），**永久并入 `base_rows`**（`base_rows += 增量`），再把边界推进到最新一条已纳入的消息。每次请求的历史都是上一次历史的前缀延伸，因此前缀逐 token 一致以命中上下文缓存。
+- **延续会话**：不调用前置决策；通过 [`_load_rows_after()`](#fn-load-rows-after) 读取 `rowid` 大于 `watermark_rowid` 的新增群消息（按 `rowid` 升序、不设上限，含 bot 回复期间其它成员新发的消息），**永久并入 `base_rows`**（`base_rows += 增量`），再把 `watermark_rowid` 推进到已纳入的最大 `rowid`。每次请求的历史都是上一次历史的前缀延伸，因此前缀逐 token 一致以命中上下文缓存。
 - **新对话**（窗口内无 bot 对话）：调用 [`get_dynamic_history_length()`](#fn-get-dynamic-history-length) 决定条数并加载基础历史，重置并固定为 `base_rows`，建立会话并记录 `last_bot_ts`。
 
-延续会话期间 `history_count` 为累计的 `base_rows` 总行数（每回合递增约“1 问+1 答”）。使用 `(timestamp, rowid)` 作为边界，可避免同秒消息被遗漏或重复。
+延续会话期间 `history_count` 为累计的 `base_rows` 总行数（每回合递增约“1 问+1 答”）。历史顺序与增量边界都以 `rowid`（入库顺序）为准，因此同秒消息以及时间戳与入库顺序不一致的消息都不会被边界跳过。
 
 **数据库不变量（会话延续的正确性前提）：** bot 的快速回复「（模型信息）Waiting……」**不写入**聊天库 —— `send_and_save()` 仅在 `is_finish=True`（正式回复/提示）时入库。若把「Waiting」也入库，它会被当作一条真实聊天记录混入 `base_rows`，既污染模型看到的历史前缀，也会把 `history_count`（界面显示“记录：N”）虚增一条（每回合多计 1 条伪记录），违背“只统计真实聊天记录”的预期。因此快速回复只发送、不入库。
 
@@ -739,7 +739,7 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 ### 7.3 `_get_group_session()`
 
-返回指定群的会话状态字典；若该群尚未建立会话，则初始化一份默认状态（`active=False`，`base_rows`、`cutoff_ts`、`cutoff_rowid`、`last_bot_ts` 归零）登记到 `_group_session` 后再返回。`_group_session` 是模块级全局字典，仅进程内有效——重启后清空，会话回到「新对话」。
+返回指定群的会话状态字典；若该群尚未建立会话，则初始化一份默认状态（`active=False`，`base_rows`、`watermark_rowid`、`last_bot_ts` 归零）登记到 `_group_session` 后再返回。`_group_session` 是模块级全局字典，仅进程内有效——重启后清空，会话回到「新对话」。
 
 <a id="fn-should-extend-conversation"></a>
 
@@ -751,9 +751,9 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 ### 7.5 `_load_rows_after()`
 
-增量读取：查询严格位于边界 `(cutoff_ts, cutoff_rowid)` 之后的新增群消息（按时间升序、不设上限），用于延续会话追加。排除当前触发消息（`message_id != 当前`），条件为 `timestamp > cutoff_ts OR (timestamp = cutoff_ts AND rowid > cutoff_rowid)`；以 `(timestamp, rowid)` 双键定位，避免同秒消息被遗漏或重复。
+增量读取：查询 `rowid` 严格大于 `watermark_rowid` 的新增群消息（按 `rowid` 升序、不设上限），用于延续会话追加。`rowid` 即入库顺序，作为增量下界，因此同秒消息以及时间戳与入库顺序不一致的消息都不会被边界跳过。排除当前触发消息（`message_id != 当前`）。
 
-上界为本次提问自身的 `rowid`（`g.rowid <= 本次提问的 rowid`，当前消息不在库中时退化为不限制）：只读到“本次提问那一行”为止。这样当前提问既不进入 `base_rows`（提示词里不重复出现），边界也不会被更晚入库的消息推过它自己——并发时下一轮增量必然把它补回来，不会丢消息。
+上界为本次提问自身的 `rowid`（`g.rowid <= 本次提问的 rowid`，当前消息不在库中时退化为不限制）：只读到“本次提问那一行”为止。这样当前提问既不进入 `base_rows`（提示词里不重复出现），边界也不会被更晚入库的消息推过它自己，下一轮增量必然把它补回来。
 
 <a id="class-onebot-message-parser"></a>
 
@@ -1249,16 +1249,19 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
 1. 连接群消息表。
 2. 左连接全局昵称和本群名片。
 3. 排除当前触发消息的 `message_id`，并以本次提问的 `rowid` 作为读取上界（只读到该行为止）。
-4. 按 `timestamp DESC, rowid DESC` 获取最近 `dynamic_limit` 条。
-5. 查询结束后 `reverse()`，恢复成从旧到新的提示词顺序。
+4. 按 `rowid DESC` 获取最近 `dynamic_limit` 条。
+5. 查询结束后 `reverse()`，恢复成 `rowid` 升序的提示词顺序。
+
+`rowid` 即入库顺序，作为历史顺序与增量下界的依据；时间戳只用于显示。
 
 排除当前触发消息很重要：该消息已经提前存库，但会在提示词最后作为“当前问题”单独加入，不能在历史中重复出现。
 
-上界同样是正确性要求：若只排除而不设上界，当本次提问之后还有别的消息入库时，增量边界会越过被排除的这条提问（边界取的是过滤后列表的末行），该提问此后永远不再被读回，直到会话窗口过期或进程重启。设上界后，当前提问始终是“下一轮增量补回的第一条”，既不重复也不丢失。
+上界同样是必要条件：若只排除而不设上界，当本次提问之后还有别的消息入库时，增量边界会越过被排除的这条提问（边界取的是过滤后列表的末行），该提问此后不再被读回，直到会话窗口过期或进程重启。设上界后，当前提问始终是“下一轮增量补回的第一条”，既不重复也不丢失。
 
 每张消息表都为 `timestamp` 建立了索引 `idx_{table}_timestamp`（由 `init_db()`
-启动时创建）。该索引能大幅减少按时间排序和筛选时的全表扫描，使百万条级别下
-`LIMIT` 的耗时也与总记录数基本解耦。
+启动时创建），用于按时间过滤的查询（如 `get_dynamic_history_length()`）。
+`_load_history_rows()` 按 `rowid` 倒序取 `LIMIT` 条，可沿主键索引反向扫描后停止，
+百万条级别下耗时也与总记录数基本解耦。
 代码仍不承诺固定耗时：极端情况下耗时仍可能受磁盘、SQLite 缓存及机器性能影响。
 
 <a id="fn-load-user-display-map"></a>
@@ -1357,7 +1360,7 @@ QQ 昵称不同时显示 `群名片（QQ昵称：昵称）`，相同时只显示
 
 1. 生成当前本地时间。
 2. 组合当前提问者的群名片和 QQ 昵称。
-3. 查询该群会话状态 `_get_group_session(group_id)`：若设定时间内有 bot 对话且基础历史已固定，则进入**延续会话**模式——不再调用前置 AI，读取 (cutoff_timestamp, cutoff_rowid) 之后的新增群消息并**永久并入基础历史**（每次请求前缀是上次的前缀延伸以命中缓存，不设上限）；否则视为**新对话**，将当前消息富文本传给动态历史决策（固定算法/前置 AI）决定条数，并把结果作为本会话的基础历史固定下来。
+3. 查询该群会话状态 `_get_group_session(group_id)`：若设定时间内有 bot 对话且基础历史已固定，则进入**延续会话**模式——不再调用前置 AI，读取 `rowid` 大于 `watermark_rowid` 的新增群消息并**永久并入基础历史**（每次请求前缀是上次的前缀延伸以命中缓存，不设上限）；否则视为**新对话**，将当前消息富文本传给动态历史决策（固定算法/前置 AI）决定条数，并把结果作为本会话的基础历史固定下来。
 4. 查询基础历史（新对话）或增量追加历史（延续会话）并生成昵称映射。
 5. 格式化历史文本。
 6. 查询机器人在当前群的名片，失败时使用启动时取得的 QQ 昵称。

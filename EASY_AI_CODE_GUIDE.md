@@ -239,7 +239,7 @@ NoneBot / OneBot 事件
   - [`_execute_web_search()`](#fn-execute-web-search)校验并执行一批工具调用。
   - [`_run_openai_third_search_workflow()`](#fn-run-openai-third-search-workflow)管理多轮搜索和最后强制回答。
 - 历史读取与回复头
-  - [`_load_history_rows()`](#fn-load-history-rows)查询、排除当前消息并恢复旧到新顺序（返回含 `rowid`，用于精确定位增量边界）。
+  - [`_load_history_rows()`](#fn-load-history-rows)查询、排除当前消息并恢复旧到新顺序（返回含 `rowid`，用于精确定位增量边界）；读取上界为本次提问的 `rowid`。
   - [`_load_user_display_map()`](#fn-load-user-display-map)生成群名片/QQ 昵称映射。
   - [`_format_history_text()`](#fn-format-history-text)格式化历史；内部 [`convert_reply_time()`](#local-convert-reply-time)处理引用，[`convert_at()`](#local-convert-at)处理数字 `@`。
   - [`_format_reply_prefix()`](#fn-format-reply-prefix)生成固定正式回复头。
@@ -753,6 +753,8 @@ WAL 有利于读写并发，但并不取代事务；每次写入仍显式 `commi
 
 增量读取：查询严格位于边界 `(cutoff_ts, cutoff_rowid)` 之后的新增群消息（按时间升序、不设上限），用于延续会话追加。排除当前触发消息（`message_id != 当前`），条件为 `timestamp > cutoff_ts OR (timestamp = cutoff_ts AND rowid > cutoff_rowid)`；以 `(timestamp, rowid)` 双键定位，避免同秒消息被遗漏或重复。
 
+上界为本次提问自身的 `rowid`（`g.rowid <= 本次提问的 rowid`，当前消息不在库中时退化为不限制）：只读到“本次提问那一行”为止。这样当前提问既不进入 `base_rows`（提示词里不重复出现），边界也不会被更晚入库的消息推过它自己——并发时下一轮增量必然把它补回来，不会丢消息。
+
 <a id="class-onebot-message-parser"></a>
 
 ## 8. OneBot 消息解析
@@ -1246,11 +1248,13 @@ HTTP 失败会记录状态码和响应正文；API 失败会记录 `code`、`msg
 
 1. 连接群消息表。
 2. 左连接全局昵称和本群名片。
-3. 排除当前触发消息的 `message_id`。
+3. 排除当前触发消息的 `message_id`，并以本次提问的 `rowid` 作为读取上界（只读到该行为止）。
 4. 按 `timestamp DESC, rowid DESC` 获取最近 `dynamic_limit` 条。
 5. 查询结束后 `reverse()`，恢复成从旧到新的提示词顺序。
 
 排除当前触发消息很重要：该消息已经提前存库，但会在提示词最后作为“当前问题”单独加入，不能在历史中重复出现。
+
+上界同样是正确性要求：若只排除而不设上界，当本次提问之后还有别的消息入库时，增量边界会越过被排除的这条提问（边界取的是过滤后列表的末行），该提问此后永远不再被读回，直到会话窗口过期或进程重启。设上界后，当前提问始终是“下一轮增量补回的第一条”，既不重复也不丢失。
 
 每张消息表都为 `timestamp` 建立了索引 `idx_{table}_timestamp`（由 `init_db()`
 启动时创建）。该索引能大幅减少按时间排序和筛选时的全表扫描，使百万条级别下

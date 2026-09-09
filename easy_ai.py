@@ -1661,6 +1661,12 @@ async def _run_openai_third_search_workflow(
 
 # ========== 数据库读取：保持原查询逻辑不变 ==========
 async def _load_history_rows(group_id: int, message_id, dynamic_limit: int) -> list:
+    """按时间取最近 dynamic_limit 条历史（排除本次提问），返回旧到新顺序。
+
+    上界为本次提问自身的 rowid：只读到“本次提问那一行”为止。当前提问既不进入
+    基础历史（提示词里不重复出现），边界也不会被更晚的消息推过它自己，因此下一轮
+    增量必然把它补回来——并发时不会丢消息。当前消息不在库中时退化为不设上界。
+    """
     table_name = f"group_{group_id}"
     rows = []
     try:
@@ -1671,12 +1677,16 @@ async def _load_history_rows(group_id: int, message_id, dynamic_limit: int) -> l
                 LEFT JOIN user_info u ON g.user_id = u.user_id
                 LEFT JOIN user_group_info ug ON g.user_id = ug.user_id AND ug.group_id = ?
                 WHERE g.message_id != ?
+                  AND g.rowid <= COALESCE(
+                        (SELECT rowid FROM "{table_name}" WHERE message_id = ?),
+                        9223372036854775807
+                      )
                 ORDER BY g.timestamp DESC, g.rowid DESC
                 LIMIT ?
             '''
             async with db.execute(
                     query,
-                    (group_id, str(message_id), dynamic_limit)
+                    (group_id, str(message_id), str(message_id), dynamic_limit)
             ) as cursor:
                 rows = await cursor.fetchall()
     except Exception as e:
@@ -1720,7 +1730,12 @@ async def _load_rows_after(
         group_id: int, message_id, cutoff_ts: int, cutoff_rowid: int
 ) -> list:
     """读取严格位于 (cutoff_ts, cutoff_rowid) 之后的新消息
-    （增量追加，不设上限，按时间升序；用 rowid 精确定位以防同秒丢/重）。"""
+    （增量追加，不设上限，按时间升序；用 rowid 精确定位以防同秒丢/重）。
+
+    上界为本次提问自身的 rowid：只读到“本次提问那一行”为止。这样当前提问不会
+    进入 base_rows（提示词里不重复出现），边界也不会被更晚的消息推过它自己，
+    下一轮增量必然把它补回来——并发时不会丢消息。当前消息不在库中时退化为不设上界。
+    """
     table_name = f"group_{group_id}"
     rows = []
     try:
@@ -1732,11 +1747,16 @@ async def _load_rows_after(
                 LEFT JOIN user_group_info ug ON g.user_id = ug.user_id AND ug.group_id = ?
                 WHERE g.message_id != ?
                   AND (g.timestamp > ? OR (g.timestamp = ? AND g.rowid > ?))
+                  AND g.rowid <= COALESCE(
+                        (SELECT rowid FROM "{table_name}" WHERE message_id = ?),
+                        9223372036854775807
+                      )
                 ORDER BY g.timestamp ASC, g.rowid ASC
             '''
             async with db.execute(
                     query,
-                    (group_id, str(message_id), cutoff_ts, cutoff_ts, cutoff_rowid)
+                    (group_id, str(message_id), cutoff_ts, cutoff_ts, cutoff_rowid,
+                     str(message_id))
             ) as cursor:
                 rows = await cursor.fetchall()
     except Exception as e:
@@ -1887,8 +1907,6 @@ class ChatService:
 
         sess = _get_group_session(event.group_id)
         extend = _should_extend_conversation(event.group_id)
-        # 本次为“有 bot 参与的对话”，用于判定下一次是否延续缓存会话
-        sess["last_bot_ts"] = int(datetime.datetime.now().timestamp())
 
         if extend:
             # 设定时间内有 bot 对话：把增量新消息永久并入 base_rows，
@@ -1917,6 +1935,11 @@ class ChatService:
         if rows:
             sess["cutoff_ts"] = rows[-1][0]
             sess["cutoff_rowid"] = rows[-1][4]
+        # 本次为“有 bot 参与的对话”，用于判定下一次是否延续缓存会话。
+        # 必须在会话状态提交之后才打点：否则并发请求会看到已被刷新但尚未提交的
+        # last_bot_ts，把“尚未完成的新对话重置”误判为延续会话，从而跳过前置 AI
+        # 并把整个空闲期的消息全量追加进 base_rows。
+        sess["last_bot_ts"] = int(datetime.datetime.now().timestamp())
 
         user_display_map = await _load_user_display_map(event.group_id)
         history_text = _format_history_text(rows, user_display_map)

@@ -1,9 +1,14 @@
 # Anthropic 协议分支设计（引入 DeepSeek 官方联网搜索）
 
-- 状态：**设计稿，尚未实现**
-- 最后更新：2026-10-14
+- 状态：**已实现（2026-10-15）**
+- 最后更新：2026-10-15
 - 适用范围：`easy_ai.py`、`pz.py`（本地真实配置）
-- 实现完成后的去向：结论并入 `EASY_AI_CODE_GUIDE.md`，本文件可删除或降级为附录
+- 去向：结论已并入 `EASY_AI_CODE_GUIDE.md`（§5.2 / §7.1 / §11 等）；
+  本文件保留为设计附录（含实测记录与可复现探针），后续改动以 GUIDE 为准。
+
+> 实现说明：`api_type: "anthropic"` 分支、DeepSeek 官方服务端搜索、
+> Anthropic 版博查工作流、前置 AI 分支与 `get_dynamic_history_length()` 协议反馈
+> 均已落地；本地 `pz.py` 的 `default`/`A` 已同步切到 anthropic。
 
 ---
 

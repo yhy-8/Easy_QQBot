@@ -40,25 +40,34 @@ THIRD_SEARCH_TIMEOUT = 30                                    # 第三方搜索�
 MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数；小于等于0时不提供第三方搜索工具
 ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关 (True/False)，仅当模型无原生搜索时生效
 
+# ===== Anthropic 协议配置 =====
+ANTHROPIC_VERSION = "2023-06-01"   # 协议版本头，按 Anthropic 生态惯例保留
+ANTHROPIC_MAX_TOKENS = 65536       # 协议必填；对齐 OpenAI 侧思考模式默认 64K，避免思考挤掉正文
+ANTHROPIC_WEB_SEARCH_TOOL = {      # DeepSeek 官方服务端搜索工具（一次请求闭环）
+    "type": "web_search_20260209",
+    "name": "web_search",
+    "max_uses": 10,
+}
+
 # ===== 模型配置 =====
 MODELS_CONFIG = {
     "default": {
         "api_key": "",
-        "api_url": "https://api.deepseek.com/chat/completions",
+        "api_url": "https://api.deepseek.com/anthropic",
         "name": "ds-v4-flash",
-        "api_type": "openai",
+        "api_type": "anthropic",
         "model_id": "deepseek-v4-flash-vision-exp",  # DeepSeek 需要在 body 传入这个
         "vision": False,
-        "search": False
+        "search": True
     },
     "A": {
         "api_key": "",
-        "api_url": "https://api.deepseek.com/chat/completions",
+        "api_url": "https://api.deepseek.com/anthropic",
         "name": "ds-v4-pro",
-        "api_type": "openai",
+        "api_type": "anthropic",
         "model_id": "deepseek-v4-pro",
         "vision": False,
-        "search": False
+        "search": True
     },
     "B": {
         "api_key": "",
@@ -181,6 +190,8 @@ class ModelSelection:
 
     @property
     def api_url(self) -> str:
+        if self.api_type == "anthropic":
+            return f"{self.config['api_url']}/v1/messages"
         if self.api_type == "gemini":
             return (
                 f"{self.config['api_url']}/{self.config['model_id']}"
@@ -233,7 +244,7 @@ class ChatCompletion:
 
 
 class UnsupportedAPITypeError(ValueError):
-    """模型 api_type 不是已支持的 OpenAI/Gemini 格式。"""
+    """模型 api_type 不是已支持的 OpenAI/Anthropic/Gemini 格式。"""
 
 
 class ModelHTTPError(RuntimeError):
@@ -260,6 +271,19 @@ def _extract_api_reply_text(data: dict, api_type: str) -> str:
     if api_type == "openai":
         content = _get_openai_message(data).get("content")
         return content.strip() if isinstance(content, str) else ""
+
+    if api_type == "anthropic":
+        content = data.get("content")
+        if not isinstance(content, list):
+            return ""
+        # 只拼接正文；显式跳过 thinking / server_tool_use / tool_use 等块，避免思维链进群
+        return "".join(
+            block["text"]
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        ).strip()
 
     if api_type == "gemini":
         candidates = data.get("candidates") or []
@@ -431,7 +455,7 @@ async def validate_configuration():
                 f"{', '.join(missing_fields)}"
             )
         api_type = model_config.get("api_type", "openai")
-        if api_type not in {"openai", "gemini"}:
+        if api_type not in {"openai", "anthropic", "gemini"}:
             logger.warning(
                 f"[AI Chat] 模型 {model_key!r} 使用未知 api_type={api_type!r}"
             )
@@ -583,7 +607,7 @@ async def get_dynamic_history_length(
         f"仅输出一个纯数字。禁止包含任何标点符号、换行符、前缀或解释性文本！"
     )
 
-    # 动态获取配置，兼容 OpenAI 和 Gemini 格式
+    # 动态获取配置，兼容 OpenAI、Anthropic 和 Gemini 格式
     model_config = MODELS_CONFIG.get(DYNAMIC_HISTORY_MODEL, MODELS_CONFIG["default"])
     api_type = model_config.get("api_type", "openai")
 
@@ -599,7 +623,20 @@ async def get_dynamic_history_length(
             "stream": False,
             "temperature": 0.1
         }
-    else:  # Gemini 格式兼容
+    elif api_type == "anthropic":
+        url = f"{model_config['api_url']}/v1/messages"
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": model_config["api_key"],
+            "anthropic-version": ANTHROPIC_VERSION
+        }
+        payload = {
+            "model": model_config.get("model_id", "deepseek-chat"),
+            "max_tokens": 256,  # 判定任务只需几十 token，小值可避免思考拖慢前置 AI
+            "messages": [{"role": "user", "content": prompt}],
+            "thinking": {"type": "disabled"}
+        }
+    elif api_type == "gemini":
         url = f"{model_config['api_url']}/{model_config['model_id']}:generateContent"
         headers = {
             "Content-Type": "application/json",
@@ -607,7 +644,14 @@ async def get_dynamic_history_length(
         }
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}]
-    }
+        }
+    else:
+        # 未知协议不再静默掉进 Gemini 分支，明确报出后回退默认值
+        logger.error(
+            f"[AI Chat] 前置 AI 模型 {DYNAMIC_HISTORY_MODEL!r} 使用未知 "
+            f"api_type={api_type!r}，无法决定历史条数，回退默认值"
+        )
+        return DEFAULT_LIMIT
 
     try:
         session = await get_http_session()
@@ -1254,6 +1298,26 @@ THIRD_SEARCH_TOOL = {
     }
 }
 
+THIRD_SEARCH_TOOL_ANTHROPIC = {
+    # 复用同一份 schema，避免 OpenAI/Anthropic 两处描述漂移
+    "name": THIRD_SEARCH_TOOL["function"]["name"],
+    "description": THIRD_SEARCH_TOOL["function"]["description"],
+    "input_schema": THIRD_SEARCH_TOOL["function"]["parameters"],
+}
+
+# 第三方搜索轮次耗尽后的强制文本回答指令，OpenAI/Anthropic 两条工作流共用
+SEARCH_EXHAUSTED_SUFFIX = (
+    "\n[系统最高优先级指令：第三方搜索轮次已全部用完，"
+    "当前不再存在任何可调用的工具。此指令覆盖前文中“遇到"
+    "未知信息必须优先调用搜索工具”的要求。绝对禁止再次请求、"
+    "尝试或模拟调用 web_search 或任何其他工具；绝对禁止输出"
+    "工具名、函数调用、参数 JSON、XML、工具调用标记或要求继续"
+    "搜索的文字。你必须仅使用已经获得的搜索结果和上下文，"
+    "以面向用户的普通纯文本直接回答。如果现有信息不足或无法"
+    "确认，直接如实回答“我不清楚相关信息”，不得以任何工具"
+    "调用文本代替回答。]"
+)
+
 
 # ========== 辅助函数：第三方搜索（博查AI） ==========
 async def bocha_search(
@@ -1421,6 +1485,45 @@ async def bocha_search(
         return "", 0, False
 
 
+# ========== 辅助函数：单个 web_search 工具调用 → 博查结果 ==========
+async def _bocha_from_tool_input(args: dict) -> tuple[str, int]:
+    """校验 web_search 参数并调用博查，返回 (回填文本, 结果数量)。
+
+    OpenAI 与 Anthropic 两条工作流共用，避免 freshness/参数校验与
+    “搜索无结果/搜索失败”文案在两处漂移。
+    """
+    query = args.get("query", "")
+    include = args.get("include", "")
+    exclude = args.get("exclude", "")
+    freshness = args.get("freshness", "noLimit")
+    count_arg = args.get("count", 25)
+    summary_arg = args.get("summary", True)
+    if (not isinstance(query, str) or not query.strip()
+            or not isinstance(include, str) or not isinstance(exclude, str)):
+        return "工具调用参数格式错误，请检查参数类型和搜索词后重试", 0
+    if not _is_valid_search_freshness(freshness):
+        return (
+            "freshness 参数无效，可选值为 "
+            + "、".join(THIRD_SEARCH_FRESHNESS_VALUES)
+            + "，也可使用 YYYY-MM-DD 或 "
+            + "YYYY-MM-DD..YYYY-MM-DD，请修正后重试",
+            0,
+        )
+
+    search_text, sc, search_ok = await bocha_search(
+        query.strip(),
+        include=include.strip(),
+        exclude=exclude.strip(),
+        freshness=freshness,
+        count=count_arg,
+        summary=summary_arg
+    )
+    return (
+        search_text if search_text else ("搜索无结果" if search_ok else "搜索失败"),
+        sc,
+    )
+
+
 # ========== 辅助函数：批量执行 web_search 工具调用 ==========
 async def _execute_web_search(messages: list, assistant_msg: object) -> int:
     """执行搜索工具调用并将结果追加到 messages，返回本批搜索条数。
@@ -1525,46 +1628,12 @@ async def _execute_web_search(messages: list, assistant_msg: object) -> int:
                 "content": "工具调用参数格式错误，请检查 JSON 格式后重试"
             })
             continue
-        query = args.get("query", "")
-        include = args.get("include", "")
-        exclude = args.get("exclude", "")
-        freshness = args.get("freshness", "noLimit")
-        count_arg = args.get("count", 25)
-        summary_arg = args.get("summary", True)
-        if (not isinstance(query, str) or not query.strip()
-                or not isinstance(include, str) or not isinstance(exclude, str)):
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": "工具调用参数格式错误，请检查参数类型和搜索词后重试"
-            })
-            continue
-        if not _is_valid_search_freshness(freshness):
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": (
-                    "freshness 参数无效，可选值为 "
-                    + "、".join(THIRD_SEARCH_FRESHNESS_VALUES)
-                    + "，也可使用 YYYY-MM-DD 或 "
-                    + "YYYY-MM-DD..YYYY-MM-DD，请修正后重试"
-                )
-            })
-            continue
-
-        search_text, sc, search_ok = await bocha_search(
-            query.strip(),
-            include=include.strip(),
-            exclude=exclude.strip(),
-            freshness=freshness,
-            count=count_arg,
-            summary=summary_arg
-        )
+        result_text, sc = await _bocha_from_tool_input(args)
         count += sc
         messages.append({
             "role": "tool",
             "tool_call_id": call_id,
-            "content": search_text if search_text else ("搜索无结果" if search_ok else "搜索失败")
+            "content": result_text
         })
 
     return count
@@ -1615,18 +1684,7 @@ async def _run_openai_third_search_workflow(
         else:
             modified_system = {
                 "role": "system",
-                "content": (
-                    system_prompt
-                    + "\n[系统最高优先级指令：第三方搜索轮次已全部用完，"
-                    + "当前不再存在任何可调用的工具。此指令覆盖前文中“遇到"
-                    + "未知信息必须优先调用搜索工具”的要求。绝对禁止再次请求、"
-                    + "尝试或模拟调用 web_search 或任何其他工具；绝对禁止输出"
-                    + "工具名、函数调用、参数 JSON、XML、工具调用标记或要求继续"
-                    + "搜索的文字。你必须仅使用已经获得的搜索结果和上下文，"
-                    + "以面向用户的普通纯文本直接回答。如果现有信息不足或无法"
-                    + "确认，直接如实回答“我不清楚相关信息”，不得以任何工具"
-                    + "调用文本代替回答。]"
-                )
+                "content": system_prompt + SEARCH_EXHAUSTED_SUFFIX
             }
             next_payload["messages"] = [modified_system] + messages[1:]
 
@@ -1648,6 +1706,141 @@ async def _run_openai_third_search_workflow(
             total_search_count += batch_count
         else:
             reply_text = (current_msg.get("content") or "").strip()
+            break
+
+    return ModelReply(
+        text=reply_text,
+        search=SearchResult(
+            performed=True,
+            count=total_search_count
+        )
+    )
+
+
+# ========== 辅助函数：Anthropic 第三方搜索工作流 ==========
+async def _execute_anthropic_web_search(
+        messages: list,
+        content_blocks: list
+) -> int:
+    """把 Anthropic 客户端工具调用回填进 messages，返回本批搜索条数。
+
+    assistant 消息原样回填（含 thinking / tool_use 块），再用一条 user 消息
+    携带全部 tool_result 块，符合 Anthropic 协议要求。
+    """
+    tool_uses = [
+        block for block in content_blocks
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    ]
+    if not tool_uses:
+        return 0
+
+    messages.append({"role": "assistant", "content": list(content_blocks)})
+
+    tool_results = []
+    count = 0
+    for block in tool_uses:
+        function_name = block.get("name")
+        if function_name != "web_search":
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.get("id"),
+                "content": (
+                    f"不支持的工具：{function_name}。"
+                    "当前只能调用 web_search，请修正后重试"
+                )
+            })
+            continue
+
+        args = block.get("input")
+        if not isinstance(args, dict):
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.get("id"),
+                "content": "工具调用参数格式错误，请检查 JSON 格式后重试"
+            })
+            continue
+        result_text, sc = await _bocha_from_tool_input(args)
+        count += sc
+        tool_results.append({
+            "type": "tool_result",
+            "tool_use_id": block.get("id"),
+            "content": result_text
+        })
+
+    messages.append({"role": "user", "content": tool_results})
+    return count
+
+
+async def _run_anthropic_third_search_workflow(
+        session,
+        api_url: str,
+        headers: dict,
+        model_id: str,
+        system_prompt: str,
+        user_message_content,
+        initial_data: dict
+) -> ModelReply:
+    """Anthropic 协议的第三方搜索完整流程，语义对齐 OpenAI 版。
+
+    顶层 system 承载系统提示，工具结果以 user 消息回填；搜索轮次耗尽后
+    改写顶层 system 强制文本回答。搜索计数与 SearchResult 语义与 OpenAI
+    版完全一致。
+    """
+    messages = [{"role": "user", "content": user_message_content}]
+    current_blocks = initial_data.get("content") or []
+    tool_uses = [
+        block for block in current_blocks
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    ]
+    if not tool_uses:
+        return ModelReply(
+            text=_extract_api_reply_text(initial_data, "anthropic"),
+            search=SearchResult(performed=False, count=0)
+        )
+
+    total_search_count = 0
+    total_search_count += await _execute_anthropic_web_search(
+        messages,
+        current_blocks
+    )
+
+    reply_text = ""
+    for round_num in range(MAX_SEARCH_ROUNDS):
+        is_last = (round_num == MAX_SEARCH_ROUNDS - 1)
+        next_payload = {
+            "model": model_id,
+            "max_tokens": ANTHROPIC_MAX_TOKENS,
+            "system": system_prompt if not is_last else (
+                system_prompt + SEARCH_EXHAUSTED_SUFFIX
+            ),
+            "messages": messages
+        }
+        if not is_last:
+            next_payload["tools"] = [THIRD_SEARCH_TOOL_ANTHROPIC]
+
+        async with session.post(
+                api_url,
+                headers=headers,
+                json=next_payload,
+                timeout=AI_CHAT_TIMEOUT
+        ) as next_resp:
+            if next_resp.status != 200:
+                raise Exception(await next_resp.text())
+
+            current_data = await next_resp.json()
+            current_blocks = current_data.get("content") or []
+
+        next_tool_uses = [
+            block for block in current_blocks
+            if isinstance(block, dict) and block.get("type") == "tool_use"
+        ]
+        if next_tool_uses and not is_last:
+            total_search_count += await _execute_anthropic_web_search(
+                messages,
+                current_blocks
+            )
+        else:
+            reply_text = _extract_api_reply_text(current_data, "anthropic")
             break
 
     return ModelReply(
@@ -2043,6 +2236,52 @@ class ChatService:
                 use_third_search=selection.use_third_search
             )
 
+        if selection.api_type == "anthropic":
+            headers = {
+                "Content-Type": "application/json",
+                "x-api-key": model_config["api_key"],
+                "anthropic-version": ANTHROPIC_VERSION
+            }
+
+            # Anthropic 用 content 块数组；正文在前，图片在后。
+            user_message_content = [{"type": "text", "text": final_prompt}]
+            if selection.vision_enabled and model_visuals:
+                for visual in model_visuals:
+                    user_message_content.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": visual.mime_type,
+                            "data": visual.base64_data
+                        }
+                    })
+
+            payload = {
+                "model": model_config.get("model_id", "deepseek-chat"),
+                "max_tokens": ANTHROPIC_MAX_TOKENS,
+                "system": system_prompt,
+                "messages": [{
+                    "role": "user",
+                    "content": user_message_content
+                }]
+                # 省略 thinking 字段 = 保持思考开启（正式问答决策 1）
+            }
+
+            if selection.search_enabled:
+                payload["tools"] = [ANTHROPIC_WEB_SEARCH_TOOL]
+            elif selection.use_third_search:
+                payload["tools"] = [THIRD_SEARCH_TOOL_ANTHROPIC]
+
+            return PreparedModelRequest(
+                api_type=selection.api_type,
+                api_url=selection.api_url,
+                headers=headers,
+                payload=payload,
+                system_prompt=system_prompt,
+                user_message_content=user_message_content,
+                use_third_search=selection.use_third_search
+            )
+
         if selection.api_type == "gemini":
             headers = {
                 "Content-Type": "application/json",
@@ -2117,6 +2356,34 @@ class ChatService:
         return ModelReply(text=reply_text, search=search_result)
 
     @staticmethod
+    def parse_anthropic_reply(
+            data: dict,
+            search_enabled: bool
+    ) -> ModelReply:
+        reply_text = _extract_api_reply_text(data, "anthropic")
+        search_result = SearchResult()
+
+        if search_enabled:
+            # usage.server_tool_use.web_search_requests 是权威搜索次数；
+            # 未搜索时该键不存在，按决策 4 不显示搜索字段。
+            usage = data.get("usage") if isinstance(data, dict) else None
+            server_tool_use = (
+                usage.get("server_tool_use")
+                if isinstance(usage, dict) else None
+            )
+            requests = (
+                server_tool_use.get("web_search_requests")
+                if isinstance(server_tool_use, dict) else None
+            )
+            if type(requests) is int and requests > 0:
+                search_result = SearchResult(
+                    performed=True,
+                    count=requests
+                )
+
+        return ModelReply(text=reply_text, search=search_result)
+
+    @staticmethod
     async def send_model_request(
             session,
             selection: ModelSelection,
@@ -2152,6 +2419,22 @@ class ChatService:
                     request.native_search_adapter
                 )
             return ModelReply(text=reply_text)
+
+        if request.api_type == "anthropic":
+            if request.use_third_search:
+                return await _run_anthropic_third_search_workflow(
+                    session,
+                    request.api_url,
+                    request.headers,
+                    selection.config.get("model_id", "deepseek-chat"),
+                    request.system_prompt,
+                    request.user_message_content,
+                    data
+                )
+            return ChatService.parse_anthropic_reply(
+                data,
+                selection.search_enabled
+            )
 
         return ChatService.parse_gemini_reply(data, selection.search_enabled)
 

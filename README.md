@@ -41,13 +41,19 @@
 这是一只橘猫，正趴在沙发上晒太阳，表情看起来很惬意。
 ```
 
-### 原生搜索（模型自带搜索能力，如 Gemini）
+### 原生搜索（模型自带搜索能力，如 Gemini / DeepSeek Anthropic 端点）
 ```
 用户 @机器人 /b 2026年世界杯最新赛况
 机器人 @用户 （gemini-3-flash，CAS）Waiting……
 机器人 @用户
 模型：gemini-3-flash，记录：30，搜索：3
 根据最新信息，2026年世界杯小组赛...
+
+用户 @机器人 今天有什么AI新闻
+机器人 @用户 （ds-v4-flash，CAS）Waiting……
+机器人 @用户
+模型：ds-v4-flash，记录：30，搜索：2
+今天的主要AI动态有……
 ```
 
 ### 第三方搜索（模型无搜索能力，启用博查API兜底）
@@ -176,7 +182,7 @@ MODELS_CONFIG = {
         "api_key": "",               # API 密钥
         "api_url": "...",            # API 端点地址
         "name": "ds-v4-flash",       # 显示名称（回复中展示）
-        "api_type": "openai",        # API 格式："openai" 或 "gemini"
+        "api_type": "openai",        # API 格式："openai" / "anthropic" / "gemini"
         "model_id": "deepseek-v4-flash",  # 实际传入 API 的 model 参数
         "vision": False,             # 是否支持图片识别
         "search": False,             # 是否自带联网搜索
@@ -202,7 +208,7 @@ MODELS_CONFIG = {
 | `DEFAULT_MODE` | 无 /A /a 前缀时的默认模式 |
 | `THIRD_SEARCH_API_KEY` | 博查AI密钥，留空则不启用第三方搜索 |
 | `MAX_SEARCH_ROUNDS` | 最大搜索轮数。AI 每轮可自行决定发起一次或多次搜索，轮次用尽后强制文本回复；小于等于 0 时不提供第三方搜索工具 |
-| `MODELS_CONFIG.*.api_type` | `"openai"` 兼容绝大多数国产模型和中转站；`"gemini"` 用于 Google Gemini |
+| `MODELS_CONFIG.*.api_type` | `"openai"` 兼容绝大多数国产模型和中转站；`"anthropic"` 用于 Anthropic 兼容端点（DeepSeek 官方联网搜索走这里）；`"gemini"` 用于 Google Gemini |
 | `MODELS_CONFIG.*.vision` | 开启后图片消息会转为 base64 传给模型 |
 | `MODELS_CONFIG.*.search` | 模型自带搜索 → 传原生搜索参数；不勾选 + 开启 `ENABLE_THIRD_SEARCH` → 走博查兜底 |
 | `ENABLE_THIRD_SEARCH` | 第三方搜索总开关。仅模型 `search: false` 时生效，开启后注册搜索工具让AI自行决定搜索词。需同时填写 `THIRD_SEARCH_API_KEY` |

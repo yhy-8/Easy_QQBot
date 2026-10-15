@@ -47,7 +47,7 @@ easy_ai.py
 ├─ Anthropic 协议常量（非配置项）
 │  └─ ANTHROPIC_VERSION / ANTHROPIC_MAX_TOKENS / ANTHROPIC_WEB_SEARCH_TOOL
 ├─ API 回包与搜索适配
-│  ├─ _get_openai_message() / _extract_api_reply_text()
+│  ├─ _get_openai_message() / _get_gemini_content() / _extract_api_reply_text()
 │  └─ _enable_openai_native_search() / _parse_openai_native_search_response()
 ├─ Driver、HTTP 会话、配置检查、数据库初始化
 │  ├─ driver / _http_session / init_http_session() / close_http_session() / get_http_session()
@@ -58,10 +58,11 @@ easy_ai.py
 ├─ 发送与写库：_send_loop() / send_and_save() / insert_message_to_db()
 ├─ 视觉：_append_visual_notice() / _detect_image_format() / resolve_visual_attachment()
 ├─ 第三方搜索
-│  ├─ THIRD_SEARCH_TOOL / THIRD_SEARCH_TOOL_ANTHROPIC / SEARCH_EXHAUSTED_SUFFIX
+│  ├─ THIRD_SEARCH_TOOL / THIRD_SEARCH_TOOL_ANTHROPIC / THIRD_SEARCH_TOOL_GEMINI / SEARCH_EXHAUSTED_SUFFIX
 │  ├─ bocha_search() / _bocha_from_tool_input()
 │  ├─ _execute_web_search() / _run_openai_third_search_workflow()
-│  └─ _execute_anthropic_web_search() / _run_anthropic_third_search_workflow()
+│  ├─ _execute_anthropic_web_search() / _run_anthropic_third_search_workflow()
+│  └─ _has_gemini_function_call() / _execute_gemini_web_search() / _run_gemini_third_search_workflow()
 ├─ 历史与回复头：_load_history_rows() / _load_user_display_map() / _format_history_text() / _format_reply_prefix()
 ├─ 会话延续：_group_session / _get_group_session() / _should_extend_conversation() / _load_rows_after()
 ├─ ChatService
@@ -276,6 +277,9 @@ AND MAX_SEARCH_ROUNDS > 0
   `contents[0].parts`，图片用 `inlineData`；原生搜索用 `googleSearch`。
 - `parse_gemini_reply()`：优先 `groundingMetadata.webSearchQueries` 数量；否则统计
   `groundingChunks` 中带 `web` 的条目；无 grounding 证据则不显示。
+- 正文提取跳过 `thought: true` 的部分，思维链绝不进群。
+- 第三方搜索：`tools` 注册 `functionDeclarations`，回包解析 `functionCall`，结果以
+  `functionResponse` 回填（见 §11）。
 
 ### 5.4 正文提取与发送分流
 
@@ -294,7 +298,8 @@ AND MAX_SEARCH_ROUNDS > 0
    `_parse_openai_native_search_response()`；否则只取正文。
 3. `anthropic`：第三方搜索 → `_run_anthropic_third_search_workflow()`；否则
    `parse_anthropic_reply()`。
-4. `gemini`：`parse_gemini_reply()`。
+4. `gemini`：第三方搜索 → `_run_gemini_third_search_workflow()`；否则
+   `parse_gemini_reply()`。
 
 `complete()` 会把空正文替换为 `（模型API拒绝回复）`。
 
@@ -477,8 +482,9 @@ AND MAX_SEARCH_ROUNDS > 0
 
 ### 工具与校验
 
-`THIRD_SEARCH_TOOL`（OpenAI 形状）与 `THIRD_SEARCH_TOOL_ANTHROPIC`
-（`{name, description, input_schema}`，复用同一份 schema，避免两处漂移）暴露 `web_search`：
+`THIRD_SEARCH_TOOL`（OpenAI 形状）、`THIRD_SEARCH_TOOL_ANTHROPIC`
+（`{name, description, input_schema}`）与 `THIRD_SEARCH_TOOL_GEMINI`
+（`{name, description, parameters}`）复用同一份 schema，避免多处漂移，均暴露 `web_search`：
 必填 `query`；可选 `freshness`、`include`、`exclude`、`count`（1-50，默认 25）、
 `summary`（默认 true）。`_is_valid_search_freshness()` 接受五个预设值、真实
 `YYYY-MM-DD`、以及起始不晚于结束的 `YYYY-MM-DD..YYYY-MM-DD`。
@@ -494,8 +500,8 @@ AND MAX_SEARCH_ROUNDS > 0
 ### 公共参数处理
 
 `_bocha_from_tool_input(args)`：校验 `query`/`include`/`exclude` 类型与 `freshness`，
-调用 `bocha_search()`，返回 `(回填给模型的文本, 结果数量)`。OpenAI 与 Anthropic 两条工作流共用，
-避免参数校验与“搜索无结果/搜索失败”文案在两处漂移。
+调用 `bocha_search()`，返回 `(回填给模型的文本, 结果数量)`。三条工作流共用，
+避免参数校验与“搜索无结果/搜索失败”文案在多处漂移。
 
 ### OpenAI 工作流 `_run_openai_third_search_workflow()`
 
@@ -522,7 +528,24 @@ AND MAX_SEARCH_ROUNDS > 0
 | 末轮强制回答 | 改写 system 消息 | 改写顶层 `system` |
 
 `_execute_anthropic_web_search()` 负责把一批 `tool_use` 转成博查结果并回填。
-`SEARCH_EXHAUSTED_SUFFIX` 为两条工作流共用的强制回答指令。
+
+### Gemini 工作流 `_run_gemini_third_search_workflow()`
+
+语义同样对齐 OpenAI/Anthropic 版，消息形状为 `contents` + `systemInstruction`：
+
+| 环节 | Gemini 版 |
+|---|---|
+| 首轮 contents | 一条 user（`parts` 含文本与 `inlineData`） |
+| 判断工具调用 | `candidate.content.parts[]` 含 `functionCall` |
+| 追加 model 轮次 | **原样回填整个 `content`**（含 `thoughtSignature`、`thought` 标记） |
+| 回填结果 | 一条 `role:"user"` + 多个 `functionResponse` 块；`response` 必须是对象，并回填 `functionCall` 的 `id` |
+| 末轮强制回答 | 改写 `systemInstruction` |
+
+Gemini 3 对 function calling 强制校验 `thoughtSignature`：模型返回的轮次必须原样回填、
+不可复制或裁剪 parts；并行调用的 `id` 只回填、不新增。`_has_gemini_function_call()`
+判断是否需要回填。
+
+`SEARCH_EXHAUSTED_SUFFIX` 为三条工作流共用的强制回答指令。
 
 `MAX_SEARCH_ROUNDS <= 0` 时不注册工具、不进工作流。后续模型请求非 200 向上抛，由 Handler 处理。
 
@@ -561,7 +584,7 @@ AND MAX_SEARCH_ROUNDS > 0
     content 块（text + image）；原生搜索注册 `ANTHROPIC_WEB_SEARCH_TOOL`；否则注册
     `THIRD_SEARCH_TOOL_ANTHROPIC`；不传 `thinking`（保持思考）。
   - gemini：`systemInstruction` + `contents[0].parts`（文本 + `inlineData`）；
-    原生搜索用 `googleSearch`。
+    原生搜索用 `googleSearch`；否则注册 `THIRD_SEARCH_TOOL_GEMINI` 的 `functionDeclarations`。
 - `parse_gemini_reply()` / `parse_anthropic_reply()`：提取正文与搜索状态。
 - `send_model_request()`：见 §5.4。
 - `complete()`：解析图片 → 写回占位 → 构建提示词/请求 → 发送 → 空正文兜底 →
@@ -622,7 +645,8 @@ AND MAX_SEARCH_ROUNDS > 0
 9. `FinishedException` 必须重抛。
 10. 原生搜索无可核实统计 → 不显示搜索字段；有搜索能力但未搜 → 同样不显示（Anthropic/Gemini 语义）。
 11. 第三方搜索末轮强制文本回答；全部无结果时显示 `搜索：False`。
-12. Anthropic 正文只取 `type=="text"` 块，思维链绝不进群。
+12. Anthropic 正文只取 `type=="text"` 块；Gemini 正文跳过 `thought: true` 的部分——思维链绝不进群。
+13. Gemini 3 function calling 必须原样回填模型轮次（含 `thoughtSignature`）并回填 `id`，否则 400。
 
 ---
 
@@ -683,7 +707,7 @@ git diff --check
 | 模型选择 | 默认、大写、小写、未知前缀 |
 | OpenAI | 纯文本、JPEG/PNG/WebP Data URL、原生搜索、第三方搜索 |
 | Anthropic | 纯文本、image 块、`thinking` 过滤、官方搜索计数、`search:false` 回退博查、前置 AI 分支 |
-| Gemini | 纯文本、`inlineData`、`googleSearch`、grounding 计数 |
+| Gemini | 纯文本、`inlineData`、`googleSearch`、grounding 计数、`thought` 过滤、`search:false` 回退博查、`thoughtSignature`/`id` 回填 |
 | 第三方搜索 | 无工具调用、单轮、多轮、无结果、失败、参数错误 |
 | 发送 | 无限重发 + 10 秒收口、拦截备用提示、存库失败、`finish()` |
 

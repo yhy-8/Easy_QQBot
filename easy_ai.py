@@ -265,6 +265,17 @@ def _get_openai_message(data: dict) -> dict:
     return message if isinstance(message, dict) else {}
 
 
+def _get_gemini_content(data: dict) -> dict:
+    """获取 Gemini 回包中第一条 candidate.content，缺失时返回空字典"""
+    if not isinstance(data, dict):
+        return {}
+    candidates = data.get("candidates") or []
+    if not candidates or not isinstance(candidates[0], dict):
+        return {}
+    content = candidates[0].get("content")
+    return content if isinstance(content, dict) else {}
+
+
 def _extract_api_reply_text(data: dict, api_type: str) -> str:
     """从 OpenAI / Anthropic / Gemini 回包中提取正文；缺少正文时返回空字符串"""
     if not isinstance(data, dict):
@@ -288,15 +299,16 @@ def _extract_api_reply_text(data: dict, api_type: str) -> str:
         ).strip()
 
     if api_type == "gemini":
-        candidates = data.get("candidates") or []
-        if not candidates or not isinstance(candidates[0], dict):
-            return ""
-        content = candidates[0].get("content") or {}
-        parts = content.get("parts") or [] if isinstance(content, dict) else []
+        parts = _get_gemini_content(data).get("parts") or []
         if not isinstance(parts, list):
             return ""
         for part in reversed(parts):
-            if isinstance(part, dict) and isinstance(part.get("text"), str):
+            # 跳过 thought 部分，思维链绝不进群
+            if (
+                    isinstance(part, dict)
+                    and part.get("thought") is not True
+                    and isinstance(part.get("text"), str)
+            ):
                 text = part["text"].strip()
                 if text:
                     return text
@@ -1307,6 +1319,13 @@ THIRD_SEARCH_TOOL_ANTHROPIC = {
     "input_schema": THIRD_SEARCH_TOOL["function"]["parameters"],
 }
 
+THIRD_SEARCH_TOOL_GEMINI = {
+    # Gemini functionDeclarations 同样复用这份 schema（REST 接受小写 type）
+    "name": THIRD_SEARCH_TOOL["function"]["name"],
+    "description": THIRD_SEARCH_TOOL["function"]["description"],
+    "parameters": THIRD_SEARCH_TOOL["function"]["parameters"],
+}
+
 # 第三方搜索轮次耗尽后的强制文本回答指令，OpenAI/Anthropic 两条工作流共用
 SEARCH_EXHAUSTED_SUFFIX = (
     "\n[系统最高优先级指令：第三方搜索轮次已全部用完，"
@@ -1854,6 +1873,153 @@ async def _run_anthropic_third_search_workflow(
     )
 
 
+# ========== 辅助函数：Gemini 第三方搜索工作流 ==========
+def _has_gemini_function_call(content: dict) -> bool:
+    """判断 Gemini 的 content 中是否包含 functionCall 部分。"""
+    parts = content.get("parts") if isinstance(content, dict) else None
+    if not isinstance(parts, list):
+        return False
+    return any(
+        isinstance(part, dict) and isinstance(part.get("functionCall"), dict)
+        for part in parts
+    )
+
+
+async def _execute_gemini_web_search(contents: list, model_content: dict) -> int:
+    """把 Gemini 客户端工具调用回填进 contents，返回本批搜索条数。
+
+    Gemini 3 强制要求把模型返回的整个 content（含 thoughtSignature 与
+    thought 标记）原样回填，再追加一条 user 消息携带 functionResponse；
+    因此这里不做逐字段重建。另需把 functionCall 的 id 原样写入
+    functionResponse.id，Gemini 才能把结果映射回对应请求。
+    """
+    parts = model_content.get("parts") if isinstance(model_content, dict) else None
+    if not isinstance(parts, list):
+        return 0
+    function_calls = [
+        part for part in parts
+        if isinstance(part, dict) and isinstance(part.get("functionCall"), dict)
+    ]
+    if not function_calls:
+        return 0
+
+    # 原样回填模型轮次（保留 thoughtSignature），不要复制或裁剪 parts
+    contents.append(model_content)
+
+    response_parts = []
+    count = 0
+    for part in function_calls:
+        function_call = part["functionCall"]
+        function_name = function_call.get("name")
+        call_id = function_call.get("id")
+        if function_name != "web_search":
+            response = {
+                "name": function_name if isinstance(function_name, str) else "",
+                "response": {
+                    "error": (
+                        f"不支持的工具：{function_name}。"
+                        "当前只能调用 web_search，请修正后重试"
+                    )
+                }
+            }
+        else:
+            args = function_call.get("args")
+            if not isinstance(args, dict):
+                response = {
+                    "name": function_name,
+                    "response": {
+                        "error": "工具调用参数格式错误，请检查参数后重试"
+                    }
+                }
+            else:
+                result_text, sc = await _bocha_from_tool_input(args)
+                count += sc
+                response = {
+                    "name": function_name,
+                    "response": {"result": result_text}
+                }
+        if isinstance(call_id, str) and call_id:
+            response["id"] = call_id
+        response_parts.append({"functionResponse": response})
+
+    contents.append({"role": "user", "parts": response_parts})
+    return count
+
+
+async def _run_gemini_third_search_workflow(
+        session,
+        api_url: str,
+        headers: dict,
+        system_prompt: str,
+        user_message_content,
+        initial_data: dict
+) -> ModelReply:
+    """Gemini 协议的第三方搜索完整流程，语义对齐 OpenAI / Anthropic 版。
+
+    工具结果以 functionResponse 回填；搜索轮次耗尽后改写 systemInstruction
+    强制文本回答。搜索计数与 SearchResult 语义与另外两条工作流一致。
+    """
+    contents = [{"role": "user", "parts": user_message_content}]
+    current_content = _get_gemini_content(initial_data)
+    if not _has_gemini_function_call(current_content):
+        return ModelReply(
+            text=_extract_api_reply_text(initial_data, "gemini"),
+            search=SearchResult(performed=False, count=0)
+        )
+
+    total_search_count = await _execute_gemini_web_search(
+        contents,
+        current_content
+    )
+
+    reply_text = ""
+    for round_num in range(MAX_SEARCH_ROUNDS):
+        is_last = (round_num == MAX_SEARCH_ROUNDS - 1)
+        next_payload = {
+            "systemInstruction": {
+                "parts": [{
+                    "text": system_prompt if not is_last else (
+                        system_prompt + SEARCH_EXHAUSTED_SUFFIX
+                    )
+                }]
+            },
+            "contents": contents
+        }
+        if not is_last:
+            next_payload["tools"] = [
+                {"functionDeclarations": [THIRD_SEARCH_TOOL_GEMINI]}
+            ]
+
+        async with session.post(
+                api_url,
+                headers=headers,
+                json=next_payload,
+                timeout=AI_CHAT_TIMEOUT
+        ) as next_resp:
+            if next_resp.status != 200:
+                raise Exception(await next_resp.text())
+
+            current_data = await next_resp.json()
+            current_content = _get_gemini_content(current_data)
+
+        if _has_gemini_function_call(current_content) and not is_last:
+            total_search_count += await _execute_gemini_web_search(
+                contents,
+                current_content
+            )
+        else:
+            reply_text = _extract_api_reply_text(current_data, "gemini")
+            break
+
+    return ModelReply(
+        text=reply_text,
+        search=SearchResult(
+            performed=True,
+            count=total_search_count
+        )
+    )
+
+
 # ========== 数据库读取：历史行查询 ==========
 async def _load_history_rows(group_id: int, message_id, dynamic_limit: int) -> list:
     """取最近 dynamic_limit 条历史（排除本次提问），返回 rowid 升序。
@@ -2310,13 +2476,19 @@ class ChatService:
             }
             if selection.search_enabled:
                 payload["tools"] = [{"googleSearch": {}}]
+            elif selection.use_third_search:
+                payload["tools"] = [
+                    {"functionDeclarations": [THIRD_SEARCH_TOOL_GEMINI]}
+                ]
 
             return PreparedModelRequest(
                 api_type=selection.api_type,
                 api_url=selection.api_url,
                 headers=headers,
                 payload=payload,
-                system_prompt=system_prompt
+                system_prompt=system_prompt,
+                user_message_content=parts,
+                use_third_search=selection.use_third_search
             )
 
         raise UnsupportedAPITypeError(selection.api_type)
@@ -2438,7 +2610,22 @@ class ChatService:
                 selection.search_enabled
             )
 
-        return ChatService.parse_gemini_reply(data, selection.search_enabled)
+        if request.api_type == "gemini":
+            if request.use_third_search:
+                return await _run_gemini_third_search_workflow(
+                    session,
+                    request.api_url,
+                    request.headers,
+                    request.system_prompt,
+                    request.user_message_content,
+                    data
+                )
+            return ChatService.parse_gemini_reply(
+                data,
+                selection.search_enabled
+            )
+
+        raise UnsupportedAPITypeError(request.api_type)
 
     async def complete(
             self,

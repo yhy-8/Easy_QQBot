@@ -164,6 +164,7 @@ ENABLE_AI_HISTORY_DECISION = True  # AI 动态决定历史记录条数 (True/Fal
 DYNAMIC_HISTORY_MODEL = "default"  # 决定上下文条数所用的模型 (对应 MODELS_CONFIG 键名)
 DYNAMIC_HISTORY_TIMEOUT = 30       # 前置AI超时时间（秒）
 AI_CHAT_TIMEOUT = 120              # 正式聊天中每次模型请求的超时时间（秒）
+SEND_RETRY_TIMEOUT = 10            # 单条消息发送总超时（秒）：期间无限重发，超时判定失败
 CONTEXT_CACHE_WINDOW = 3600        # 会话延续窗口（秒）：该时长内存在 bot 对话则延续会话并增量追加（默认 3600，即 1 小时）
 
 IMAGE_BASE_DIR = ""                # 图片缓存目录。同机部署留空；跨Docker填挂载路径
@@ -175,6 +176,15 @@ THIRD_SEARCH_API_URL = "https://api.bocha.cn/v1/web-search"  # 博查AI搜索端
 MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数；小于等于0时不提供第三方搜索工具
 THIRD_SEARCH_TIMEOUT = 30                                   # 第三方搜索请求超时（秒）
 ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关，仅当模型无原生搜索时生效
+
+# ===== Anthropic 协议配置 =====
+ANTHROPIC_VERSION = "2023-06-01"   # 协议版本头，按 Anthropic 生态惯例保留
+ANTHROPIC_MAX_TOKENS = 65536       # 协议必填；思考模式下给得比思考长度小会挤掉正文
+ANTHROPIC_WEB_SEARCH_TOOL = {      # DeepSeek 官方服务端搜索工具（一次请求闭环）
+    "type": "web_search_20260209",
+    "name": "web_search",
+    "max_uses": 10,
+}
 
 # ===== 模型配置 =====
 MODELS_CONFIG = {
@@ -202,16 +212,21 @@ MODELS_CONFIG = {
 | `DYNAMIC_HISTORY_MODEL` | 上述决策使用的模型，通常用最便宜的模型 |
 | `DYNAMIC_HISTORY_TIMEOUT` | 前置决策AI超时秒数 |
 | `AI_CHAT_TIMEOUT` | 正式聊天中每次模型请求的超时秒数，包括搜索后的后续请求 |
+| `SEND_RETRY_TIMEOUT` | 单条消息发送总超时秒数：期间无限重发，超时判定失败（如敏感词被拦截） |
 | `CONTEXT_CACHE_WINDOW` | 会话延续窗口秒数：该时长内存在 bot 对话则延续会话并增量追加，不重新决策 |
 | `THIRD_SEARCH_TIMEOUT` | 第三方搜索超时秒数|
 | `IMAGE_BASE_DIR` | 图片路径：同机留空；跨Docker填容器内挂载的绝对路径 |
 | `DEFAULT_MODE` | 无 /A /a 前缀时的默认模式 |
 | `THIRD_SEARCH_API_KEY` | 博查AI密钥，留空则不启用第三方搜索 |
+| `THIRD_SEARCH_API_URL` | 博查AI搜索端点 |
 | `MAX_SEARCH_ROUNDS` | 最大搜索轮数。AI 每轮可自行决定发起一次或多次搜索，轮次用尽后强制文本回复；小于等于 0 时不提供第三方搜索工具 |
 | `MODELS_CONFIG.*.api_type` | `"openai"` 兼容绝大多数国产模型和中转站；`"anthropic"` 用于 Anthropic 兼容端点（DeepSeek 官方联网搜索走这里）；`"gemini"` 用于 Google Gemini |
 | `MODELS_CONFIG.*.vision` | 开启后图片消息会转为 base64 传给模型 |
 | `MODELS_CONFIG.*.search` | 模型自带搜索 → 传原生搜索参数；不勾选 + 开启 `ENABLE_THIRD_SEARCH` → 走博查兜底 |
 | `ENABLE_THIRD_SEARCH` | 第三方搜索总开关。仅模型 `search: false` 时生效，开启后注册搜索工具让AI自行决定搜索词。需同时填写 `THIRD_SEARCH_API_KEY` |
+| `ANTHROPIC_VERSION` | Anthropic 协议版本头，按生态惯例保留，一般无需修改 |
+| `ANTHROPIC_MAX_TOKENS` | Anthropic 协议必填的输出上限；对齐 OpenAI 侧思考模式默认 64K，给得过小会让思考挤掉正文 |
+| `ANTHROPIC_WEB_SEARCH_TOOL` | DeepSeek 官方服务端搜索工具（`web_search_20260209`，`max_uses=10`），仅 `api_type="anthropic"` 且 `search: true` 时使用 |
 
 等待nonebot和napcat通信成功后，at对应qq即可触发ai回复。
 

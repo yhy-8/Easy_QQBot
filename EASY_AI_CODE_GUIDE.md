@@ -94,7 +94,7 @@ NoneBot 事件
       ├─ build_model_request()（openai / anthropic / gemini）
       ├─ send_model_request()
       │  ├─ 原生搜索：各协议解析函数
-      │  └─ 第三方搜索：openai 或 anthropic 工作流
+      │  └─ 第三方搜索：openai / anthropic / gemini 工作流
       └─ 空正文兜底 → ChatCompletion
    ├─ _format_reply_prefix()
    └─ send_and_save() → _send_loop()
@@ -287,7 +287,7 @@ AND MAX_SEARCH_ROUNDS > 0
 
 - `openai`：第一条 `message.content`（必须字符串）。
 - `anthropic`：拼接所有 `type=="text"` 的块并 `strip()`，显式跳过 `thinking` 等。
-- `gemini`：从后向前取最后一个非空 `text`。
+- `gemini`：从后向前取最后一个非空且非 `thought` 的 `text`。
 
 `_get_openai_message()` 按标准取 `data.choices[0].message`；畸形由 Handler 通用边界处理。
 
@@ -356,7 +356,7 @@ AND MAX_SEARCH_ROUNDS > 0
   `max_tokens=256`、**`thinking: {"type": "disabled"}`**。前置判定只需几十 token，
   不关思考会以秒级拖慢甚至贴近 `DYNAMIC_HISTORY_TIMEOUT`。
 - `gemini`：`contents/parts`。
-- 未知类型：`logger.error` 明确报“协议未实现”后回退 80，**不再静默掉进 Gemini 分支**。
+- 未知类型：`logger.error` 明确报“协议未实现”后回退 80，**不落入 Gemini 分支**。
 
 ### 7.2 会话延续与增量追加（高缓存命中）
 
@@ -558,7 +558,7 @@ Gemini 3 对 function calling 强制校验 `thoughtSignature`：模型返回的�
   `reverse()` 成升序。
   - 排除当前消息：它已提前入库，但会在提示词末尾单独作为“当前问题”，不能重复。
   - 设上界：否则本次提问之后有新消息入库时，增量边界会越过这条被排除的提问，
-    导致它此后不再被读回。设上界后它始终是“下一轮增量补回的第一条”，不重复也不丢失。
+    导致这条提问此后被漏掉。设上界后它始终是“下一轮增量补回的第一条”，不重复也不丢失。
 - `_load_user_display_map()`：`群名片（QQ昵称：昵称）` 或单名，缺名片回退昵称/ID。
 - `_format_history_text()`：引用转可读时间+昵称，`[@数字]` 转可读名，每行
   `[月-日 时:分] 显示名: 内容`，顺序从旧到新。
@@ -667,9 +667,9 @@ Gemini 3 对 function calling 强制校验 `thoughtSignature`：模型返回的�
    `parse_anthropic_reply()`）。
 4. `_extract_api_reply_text()` 支持新协议正文提取。
 5. `validate_configuration()` 支持集合加新类型。
-6. **`get_dynamic_history_length()` 增加对应请求分支**——这是旧版指南遗漏、最容易
-   静默降级的一步：前置 AI 若不支持新协议，会请求失败并回退 80 条，用户和日志只能
-   看到“动态条数失效”，看不到真正原因。
+6. **`get_dynamic_history_length()` 增加对应请求分支**——新增协议时最容易漏掉的一步：
+   前置 AI 若不支持新协议，会请求失败并回退 80 条，用户和日志只能看到“动态条数失效”，
+   看不到真正原因。
 7. Handler 保持不感知协议细节。
 
 ### 新增第三方搜索工作流
@@ -679,7 +679,7 @@ Gemini 3 对 function calling 强制校验 `thoughtSignature`：模型返回的�
 
 ### 更换第三方搜索服务
 只替换 `bocha_search()` 的请求与结果格式，维持三元组契约；`_bocha_from_tool_input()`
-和两条工作流无需改动。
+和三条工作流无需改动。
 
 ### 修改数据库
 高风险。先确认：是否需要迁移；表名是否仍只来自白名单；`message_id` 去重是否保留；
@@ -724,6 +724,6 @@ git diff --check
 修改代码：
 
 1. 明确属于解析、协议、业务还是 Handler 层，尽量在原层扩展。
-2. 对照 §6/§9/§12 的数据库不变量与 §16 容错清单，确认旧行为未丢。
+2. 对照 §6/§9/§12 的数据库不变量与 §16 容错清单，确认既有行为未丢。
 3. 新增协议时不要漏掉 §17 第 6 步 `get_dynamic_history_length()`。
 4. 跑 §18 检查。

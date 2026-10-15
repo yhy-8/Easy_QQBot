@@ -660,7 +660,7 @@ async def get_dynamic_history_length(
             "contents": [{"role": "user", "parts": [{"text": prompt}]}]
         }
     else:
-        # 未知协议不再静默掉进 Gemini 分支，明确报出后回退默认值
+        # 未知协议明确报出后回退默认值，不落入 Gemini 分支
         logger.error(
             f"[AI Chat] 前置 AI 模型 {DYNAMIC_HISTORY_MODEL!r} 使用未知 "
             f"api_type={api_type!r}，无法决定历史条数，回退默认值"
@@ -702,7 +702,7 @@ class OneBotMessageParser:
     """
     同一个入口解析数据库存储文本和 AI 富文本。
 
-    两种用途的格式差异保留在内部渲染分支，调用方不再各自遍历消息段。
+    两种用途的格式差异保留在内部渲染分支，调用方无需各自遍历消息段。
     """
 
     def __init__(self, bot: Bot, group_id: int):
@@ -853,7 +853,7 @@ class OneBotMessageParser:
             seg_data: dict,
             visual_attachments: list[VisualAttachment]
     ) -> str:
-        """只展开当前引用一层，引用内容中的 reply 不再请求和递归解析。"""
+        """只展开当前引用一层，引用内容中的 reply 不做请求或递归解析。"""
         try:
             reply_msg = await self.bot.get_msg(message_id=seg_data.get("id"))
             reply_time = datetime.datetime.fromtimestamp(
@@ -1326,7 +1326,7 @@ THIRD_SEARCH_TOOL_GEMINI = {
     "parameters": THIRD_SEARCH_TOOL["function"]["parameters"],
 }
 
-# 第三方搜索轮次耗尽后的强制文本回答指令，OpenAI/Anthropic 两条工作流共用
+# 第三方搜索轮次耗尽后的强制文本回答指令，三条工作流共用
 SEARCH_EXHAUSTED_SUFFIX = (
     "\n[系统最高优先级指令：第三方搜索轮次已全部用完，"
     "当前不再存在任何可调用的工具。此指令覆盖前文中“遇到"
@@ -1510,8 +1510,8 @@ async def bocha_search(
 async def _bocha_from_tool_input(args: dict) -> tuple[str, int]:
     """校验 web_search 参数并调用博查，返回 (回填文本, 结果数量)。
 
-    OpenAI 与 Anthropic 两条工作流共用，避免 freshness/参数校验与
-    “搜索无结果/搜索失败”文案在两处漂移。
+    三条工作流共用，避免 freshness/参数校验与
+    “搜索无结果/搜索失败”文案在多处漂移。
     """
     query = args.get("query", "")
     include = args.get("include", "")
@@ -2059,7 +2059,7 @@ async def _load_history_rows(group_id: int, message_id, dynamic_limit: int) -> l
 
 
 # ========== 连续对话会话：固定基础历史 + 仅增量追加（高上下文缓存） ==========
-# 触发思路：窗口内存在 bot 对话时，不再让前置 AI 重新判断条数，而是固定上一
+# 触发思路：窗口内存在 bot 对话时，不让前置 AI 重新判断条数，而是固定上一
 # 次已选定的基础历史，只把其间新增的群消息增量追加到末尾。这样正式请求的历史前缀
 # 逐次保持逐 token 一致，从而命中供应商的上下文缓存，前置 AI 长会话只触发一次。
 # 同时增量追加不设上限，避免长会话被截断破坏前缀一致性（极端情况也几乎不会超过3000条

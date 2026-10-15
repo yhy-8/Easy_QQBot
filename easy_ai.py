@@ -56,8 +56,8 @@ MODELS_CONFIG = {
         "api_url": "https://api.deepseek.com/anthropic",
         "name": "ds-v4-flash",
         "api_type": "anthropic",
-        "model_id": "deepseek-v4-flash-vision-exp",  # DeepSeek 需要在 body 传入这个
-        "vision": False,
+        "model_id": "deepseek-flash",  # DeepSeek 需要在 body 传入这个
+        "vision": True,
         "search": True
     },
     "A": {

@@ -177,15 +177,6 @@ MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮�
 THIRD_SEARCH_TIMEOUT = 30                                   # 第三方搜索请求超时（秒）
 ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关，仅当模型无原生搜索时生效
 
-# ===== Anthropic 协议配置 =====
-ANTHROPIC_VERSION = "2023-06-01"   # 协议版本头，按 Anthropic 生态惯例保留
-ANTHROPIC_MAX_TOKENS = 65536       # 协议必填；思考模式下给得比思考长度小会挤掉正文
-ANTHROPIC_WEB_SEARCH_TOOL = {      # DeepSeek 官方服务端搜索工具（一次请求闭环）
-    "type": "web_search_20260209",
-    "name": "web_search",
-    "max_uses": 10,
-}
-
 # ===== 模型配置 =====
 MODELS_CONFIG = {
     "default": {                     # 无前缀时的默认模型
@@ -224,9 +215,6 @@ MODELS_CONFIG = {
 | `MODELS_CONFIG.*.vision` | 开启后图片消息会转为 base64 传给模型 |
 | `MODELS_CONFIG.*.search` | 模型自带搜索 → 传原生搜索参数；不勾选 + 开启 `ENABLE_THIRD_SEARCH` → 走博查兜底 |
 | `ENABLE_THIRD_SEARCH` | 第三方搜索总开关。仅模型 `search: false` 时生效，开启后注册搜索工具让AI自行决定搜索词。需同时填写 `THIRD_SEARCH_API_KEY` |
-| `ANTHROPIC_VERSION` | Anthropic 协议版本头，按生态惯例保留，一般无需修改 |
-| `ANTHROPIC_MAX_TOKENS` | Anthropic 协议必填的输出上限；对齐 OpenAI 侧思考模式默认 64K，给得过小会让思考挤掉正文 |
-| `ANTHROPIC_WEB_SEARCH_TOOL` | DeepSeek 官方服务端搜索工具（`web_search_20260209`，`max_uses=10`），仅 `api_type="anthropic"` 且 `search: true` 时使用 |
 
 等待nonebot和napcat通信成功后，at对应qq即可触发ai回复。
 

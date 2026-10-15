@@ -36,7 +36,7 @@
 ```text
 easy_ai.py
 ├─ 配置区
-│  ├─ 基础配置 / 第三方搜索配置 / Anthropic 协议配置 / MODELS_CONFIG
+│  ├─ 基础配置 / 第三方搜索配置 / MODELS_CONFIG
 │  └─ SERIOUS_SYSTEM_PROMPT / CASUAL_SYSTEM_PROMPT / MODE_PROMPTS / _bot_nickname
 ├─ 领域对象
 │  ├─ VisualAttachment / ParsedMessage / ResolvedVisual
@@ -44,6 +44,8 @@ easy_ai.py
 │  ├─ SearchResult / ModelReply / ModelSelection
 │  ├─ PreparedModelRequest / ChatCompletion
 │  └─ UnsupportedAPITypeError / ModelHTTPError
+├─ Anthropic 协议常量（非配置项）
+│  └─ ANTHROPIC_VERSION / ANTHROPIC_MAX_TOKENS / ANTHROPIC_WEB_SEARCH_TOOL
 ├─ API 回包与搜索适配
 │  ├─ _get_openai_message() / _extract_api_reply_text()
 │  └─ _enable_openai_native_search() / _parse_openai_native_search_response()
@@ -128,7 +130,7 @@ NoneBot 事件
 | `IMAGE_BASE_DIR` | 图片目录映射 | 留空信任 NapCat 绝对路径；非空只取文件名再拼接 |
 | `DEFAULT_MODE` | 无前缀默认模式 | 必须是 `serious` 或 `casual` |
 
-### 3.2 第三方搜索与 Anthropic 配置
+### 3.2 第三方搜索配置
 
 | 配置 | 作用 |
 |---|---|
@@ -137,9 +139,10 @@ NoneBot 事件
 | `THIRD_SEARCH_TIMEOUT` | 单次博查超时 |
 | `MAX_SEARCH_ROUNDS` | 第三方工具最大搜索批次数；`<=0` 时不提供工具 |
 | `ENABLE_THIRD_SEARCH` | 第三方搜索总开关 |
-| `ANTHROPIC_VERSION` | `2023-06-01`，按 Anthropic 生态惯例保留 |
-| `ANTHROPIC_MAX_TOKENS` | `65536`；协议必填，对齐 OpenAI 侧思考模式默认 64K |
-| `ANTHROPIC_WEB_SEARCH_TOOL` | DeepSeek 官方服务端搜索工具 `web_search_20260209`，`max_uses=10` |
+
+> Anthropic 协议常量（`ANTHROPIC_VERSION`、`ANTHROPIC_MAX_TOKENS`、
+> `ANTHROPIC_WEB_SEARCH_TOOL`）是协议固定值，部署者无需修改，因此定义在
+> 协议层而非配置区，详见 §2.1 架构树与 §5.2。
 
 第三方搜索的启用条件（`ModelSelection.use_third_search`）必须**同时**满足：
 

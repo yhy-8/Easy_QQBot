@@ -40,15 +40,6 @@ THIRD_SEARCH_TIMEOUT = 30                                    # 第三方搜索�
 MAX_SEARCH_ROUNDS = 3                                        # 最大搜索轮数；小于等于0时不提供第三方搜索工具
 ENABLE_THIRD_SEARCH = False                                 # 第三方搜索总开关 (True/False)，仅当模型无原生搜索时生效
 
-# ===== Anthropic 协议配置 =====
-ANTHROPIC_VERSION = "2023-06-01"   # 协议版本头，按 Anthropic 生态惯例保留
-ANTHROPIC_MAX_TOKENS = 65536       # 协议必填；对齐 OpenAI 侧思考模式默认 64K，避免思考挤掉正文
-ANTHROPIC_WEB_SEARCH_TOOL = {      # DeepSeek 官方服务端搜索工具（一次请求闭环）
-    "type": "web_search_20260209",
-    "name": "web_search",
-    "max_uses": 10,
-}
-
 # ===== 模型配置 =====
 MODELS_CONFIG = {
     "default": {
@@ -249,6 +240,17 @@ class UnsupportedAPITypeError(ValueError):
 
 class ModelHTTPError(RuntimeError):
     """正式模型首轮请求返回非 200。"""
+
+
+# ========== Anthropic 协议常量（非配置项） ==========
+# 这些是 Anthropic 协议的固定值，部署者无需修改，故不放在配置区。
+ANTHROPIC_VERSION = "2023-06-01"   # 协议版本头，按 Anthropic 生态惯例保留
+ANTHROPIC_MAX_TOKENS = 65536       # 协议必填；对齐 OpenAI 侧思考模式默认 64K，避免思考挤掉正文
+ANTHROPIC_WEB_SEARCH_TOOL = {      # DeepSeek 官方服务端搜索工具（一次请求闭环）
+    "type": "web_search_20260209",
+    "name": "web_search",
+    "max_uses": 10,
+}
 
 
 # ========== 辅助函数：安全解析 API 回复 ==========

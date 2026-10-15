@@ -264,7 +264,7 @@ def _get_openai_message(data: dict) -> dict:
 
 
 def _extract_api_reply_text(data: dict, api_type: str) -> str:
-    """从 OpenAI / Gemini 回包中提取正文；缺少正文时返回空字符串"""
+    """从 OpenAI / Anthropic / Gemini 回包中提取正文；缺少正文时返回空字符串"""
     if not isinstance(data, dict):
         return ""
 

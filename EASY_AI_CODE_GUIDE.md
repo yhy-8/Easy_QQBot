@@ -496,7 +496,7 @@ AND MAX_SEARCH_ROUNDS > 0
 
 ### OpenAI 工作流 `_run_openai_third_search_workflow()`
 
-1. 首轮无 `tool_calls` → 直接返回正文，`performed=False, count=0`（回复头 `搜索：False`）。
+1. 首轮无 `tool_calls` → 直接返回正文，`performed=False, count=0`（有搜索工具但未调用 → 回复头不显示搜索字段）。
 2. 有调用 → `_execute_web_search()` 校验 `tool_calls` 结构，写规范化 assistant 消息，
    执行博查并把结果以 `role=tool` 回填。
 3. 结构错误（缺 id、type 错、arguments 非字符串）直接抛 `ValueError` 交统一异常边界；

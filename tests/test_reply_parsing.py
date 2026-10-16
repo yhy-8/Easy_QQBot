@@ -85,6 +85,15 @@ def test_extract_gemini_skips_thought_and_takes_last_text():
     assert ea._extract_api_reply_text(data, "gemini") == "final"
 
 
+def test_extract_gemini_skips_blank_parts():
+    # 逆序扫描时，strip 后为空的段应继续向前找，而不是提前返回空串
+    data = {"candidates": [{"content": {"parts": [
+        {"text": "正文"},
+        {"text": "   "},
+    ]}}]}
+    assert ea._extract_api_reply_text(data, "gemini") == "正文"
+
+
 @pytest.mark.parametrize("data", [{}, {"candidates": []}, {"candidates": [{"content": {"parts": "x"}}]},
                                   {"candidates": [{"content": {"parts": [{"text": 5}]}}]}])
 def test_extract_gemini_malformed(data):
@@ -124,6 +133,18 @@ def test_native_search_server_side_tool_usage():
     }
     reply = ea._parse_openai_native_search_response(data, "x", "generic_search")
     assert reply.search.count == 3  # 只统计键名含 SEARCH 的整数
+
+
+def test_native_search_server_side_zero_falls_back_to_total():
+    # server_side_tool_usage 存在但无 SEARCH 键（count==0）时不应提前返回，
+    # 而应继续走 num_sources_used 兜底
+    data = {"usage": {
+        "server_side_tool_usage": {"OTHER": 5},
+        "num_sources_used": 4,
+    }}
+    reply = ea._parse_openai_native_search_response(data, "x", "generic_search")
+    assert reply.search.performed is True
+    assert reply.search.count == 4
 
 
 def test_native_search_num_sources_used_fallback():

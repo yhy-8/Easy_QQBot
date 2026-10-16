@@ -44,6 +44,8 @@ def test_append_visual_notice_without_brackets():
         (b"\x00\x00\x00\x18ftypavif", ("AVIF", None)),
         (b"\x00\x00\x00\x18ftypheic", ("HEIC", None)),
         (b"\x00\x00\x00\x18ftypmif1", ("HEIF", None)),
+        (b"\x00\x00\x00\x18ftypmsf1", ("HEIF", None)),
+        (b"\x00\x00\x00\x18ftypmp42", (None, None)),  # 进了 ftyp 块但品牌均不匹配，应回落到后续判定
         (b"  <svg xmlns='http://www.w3.org/2000/svg'>", ("SVG", None)),
         (b"junkjunk", (None, None)),
         (b"", (None, None)),

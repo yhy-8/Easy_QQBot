@@ -3,7 +3,7 @@
 > 文档目的：帮助维护者快速理解 `easy_ai.py` 的整体结构、调用链、数据库不变量、
 > 消息格式、模型协议与异常边界。本文只记录“看代码不容易看出来”的设计约定、
 > 不变量和易错点，函数逐行实现请直接读源码。
-> 最后同步：2026-10-15（Asia/Shanghai）。
+> 最后同步：2026-10-16（Asia/Shanghai）。
 
 ---
 
@@ -694,6 +694,7 @@ Gemini 3 对 function calling 强制校验 `thoughtSignature`：模型返回的�
 ```bash
 python -m py_compile easy_ai.py pz.py
 git diff --check
+python -m pytest            # 运行仓库内测试套件（见下方）
 ```
 
 按改动范围增加检查：
@@ -710,6 +711,43 @@ git diff --check
 | Gemini | 纯文本、`inlineData`、`googleSearch`、grounding 计数、`thought` 过滤、`search:false` 回退博查、`thoughtSignature`/`id` 回填 |
 | 第三方搜索 | 无工具调用、单轮、多轮、无结果、失败、参数错误 |
 | 发送 | 无限重发 + 10 秒收口、拦截备用提示、存库失败、`finish()` |
+
+### 18.1 测试套件（`tests/`）
+
+`tests/` 是纯 pytest 套件，不依赖真实 nonebot：`tests/conftest.py` 在导入
+`easy_ai.py` 前把最小可用的 nonebot API（`logger`/`get_driver`/`on_message`/
+`MessageSegment`/`FinishedException`）注入 `sys.modules`，并提供 `FakeBot`、
+`FakeEvent`、`FakeSession` 与临时 SQLite 库 fixture。异步用例用 `run(coro)`
+（`asyncio.run`）执行，因此不需要 pytest-asyncio。
+
+```bash
+python -m pytest                 # 全部用例
+python -m pytest tests/test_cache_session.py     # 单文件
+python -m coverage run -m pytest && python -m coverage report -m   # 覆盖率
+```
+
+测试文件与被覆盖区域：
+
+| 文件 | 覆盖 |
+|---|---|
+| `test_domain_objects.py` | `SearchResult`/`ResolvedVisual`/`ModelSelection`/异常 |
+| `test_reply_parsing.py` | 正文提取、原生搜索统计、Anthropic/Gemini 回复解析 |
+| `test_image_resolution.py` | 文件头识别、占位说明、路径策略、Base64 读取 |
+| `test_message_parser.py` | 存储/AI 两条渲染分支、引用展开、视觉登记 |
+| `test_search.py` | `_is_valid_search_freshness`、`bocha_search`、`_bocha_from_tool_input` |
+| `test_third_search_workflows.py` | OpenAI/Anthropic/Gemini 三条第三方搜索工作流 |
+| `test_model_request.py` | `build_model_request`、`_enable_openai_native_search` |
+| `test_cache_session.py` | `build_prompts` 新对话/延续、前缀稳定、窗口过期、群隔离 |
+| `test_dynamic_history.py` | 固定算法、AI 决策三协议、异常回退、时间分桶 |
+| `test_database.py` | 建表、写入不变量、历史查询、格式化、回复头 |
+| `test_send_and_save.py` | 重发、超时收口、备用提示、`Waiting` 不入库 |
+| `test_handlers.py` | `handle_ai_chat`/`record_chat_history`/`sync_history_on_startup` |
+| `test_chat_service.py` | `complete` 端到端、视觉占位、`send_model_request` 分流 |
+| `test_config_lifecycle.py` | 配置校验、HTTP 会话生命周期 |
+
+覆盖率目标：`easy_ai.py` 语句覆盖率 ≥99%。仅剩 3 行未覆盖（`handle_ai_chat`
+中 `finish()` 之后的 `return`），因为 `finish()` 在真实框架与测试替身中都会抛
+`FinishedException`，属不可达的防御代码。
 
 ---
 

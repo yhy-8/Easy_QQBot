@@ -219,3 +219,17 @@ MODELS_CONFIG = {
 等待nonebot和napcat通信成功后，at对应qq即可触发ai回复。
 
 **注意：挂载服务（systemctl）的时候需要留意虚拟环境，建议指定虚拟环境运行，本质还是 `nb run`**
+
+---
+
+## 测试
+
+仓库自带 pytest 套件（`tests/`），不需要真实 nonebot 与网络：
+
+```bash
+python -m pytest
+python -m coverage run -m pytest && python -m coverage report -m
+```
+
+覆盖消息解析、三种 API 协议、第三方搜索三条工作流、数据库不变量、高缓存会话、
+发送/写库与事件入口。细节见 `EASY_AI_CODE_GUIDE.md` §18.1。

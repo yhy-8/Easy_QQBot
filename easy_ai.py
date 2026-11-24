@@ -24,7 +24,7 @@ DYNAMIC_HISTORY_MODEL = "default"   # 决定上下文条数的模型标识 (对�
 DYNAMIC_HISTORY_TIMEOUT = 30  # 动态决定历史记录条数(前置AI)的超时时间（秒）
 AI_CHAT_TIMEOUT = 120         # 正式聊天(正式AI)的超时时间（秒）
 SEND_RETRY_TIMEOUT = 10       # 单条消息发送总超时（秒）：期间重试，超时判定为发送失败（如敏感词被拦截）
-SEND_RETRY_INTERVAL = 2       # 发送失败后的重试间隔（秒）
+SEND_RETRY_INTERVAL = 2       # 发送失败后的重试间隔（秒）：须小于 SEND_RETRY_TIMEOUT，否则窗口内只会尝试一次
 CONTEXT_CACHE_WINDOW = 3600   # 会话延续窗口（秒）：该时长内存在 bot 对话则延续会话并增量追加，不重新决策
 
 # 图片本地缓存目录配置

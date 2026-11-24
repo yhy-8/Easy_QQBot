@@ -3,7 +3,7 @@
 > 文档目的：帮助维护者快速理解 `easy_ai.py` 的整体结构、调用链、数据库不变量、
 > 消息格式、模型协议与异常边界。本文只记录“看代码不容易看出来”的设计约定、
 > 不变量和易错点，函数逐行实现请直接读源码。
-> 最后同步：2026-10-16（Asia/Shanghai）。
+> 最后同步：2026-11-24（Asia/Shanghai）。
 
 ---
 
@@ -126,7 +126,8 @@ NoneBot 事件
 | `DYNAMIC_HISTORY_MODEL` | 前置 AI 模型键 | 不存在时回退 `default` |
 | `DYNAMIC_HISTORY_TIMEOUT` | 前置 AI 超时 | 默认 30 秒；失败回退 80 条 |
 | `AI_CHAT_TIMEOUT` | 正式模型每轮请求超时 | 默认 120 秒；含第三方搜索后续轮次 |
-| `SEND_RETRY_TIMEOUT` | 单条消息发送总超时 | 默认 10 秒；期间无限重发，超时判定失败 |
+| `SEND_RETRY_TIMEOUT` | 单条消息发送总超时 | 默认 10 秒；期间重试，超时判定失败 |
+| `SEND_RETRY_INTERVAL` | 发送失败后的重试间隔 | 默认 2 秒；须小于 `SEND_RETRY_TIMEOUT`，否则窗口内只会尝试一次 |
 | `CONTEXT_CACHE_WINDOW` | 会话延续窗口（秒） | 默认 3600；窗口内有 bot 对话则只增量追加 |
 | `IMAGE_BASE_DIR` | 图片目录映射 | 留空信任 NapCat 绝对路径；非空只取文件名再拼接 |
 | `DEFAULT_MODE` | 无前缀默认模式 | 必须是 `serious` 或 `casual` |
@@ -435,10 +436,13 @@ AND MAX_SEARCH_ROUNDS > 0
 
 ### `send_and_save()`
 
-1. `_send_loop()` 无限重发一条消息直到成功，失败立即重试并记 warning（含第 N 次）；
-   由 `asyncio.wait_for(..., SEND_RETRY_TIMEOUT)` 收口，超时视为失败（典型：敏感词被
-   NapCat 拦截，单次约 10 秒才返回失败）。
-2. 正式回复彻底失败且提供 `fallback_msg` 时改发备用提示（同样受超时收口）。
+1. `_send_loop()` 循环重发一条消息直到成功；每次异常记 warning（含第 N 次）并等待
+   `SEND_RETRY_INTERVAL` 后再试，由 `asyncio.wait_for(..., SEND_RETRY_TIMEOUT)` 收口，
+   超时视为失败（典型：敏感词被 NapCat 拦截，单次约 10 秒才返回失败）。默认 10 秒 /
+   2 秒间隔，窗口内约 6 次尝试。
+2. 正式回复彻底失败且提供 `fallback_msg` 时改发备用提示（同样受超时收口）；
+   `fallback_msg` 可为字符串，也可为 `f(reason)` 可调用对象——传入最后一次发送异常
+   的 `str()`（无异常时为 `发送超时`），备用提示正文因此能直接展示 NapCat 的原始原因。
 3. 仅 `is_finish=True` 且返回带 `message_id` 时写库；存库内容跟随实际送达的消息。
 4. 机器人身份取自登录信息 + 群成员信息，失败回退 `AI助手` 和 `bot.self_id`。
 5. `is_finish=True` 时 `matcher.finish()`；即使全部失败也会结束 Handler。
@@ -641,7 +645,7 @@ Gemini 3 对 function calling 强制校验 `thoughtSignature`：模型返回的�
 5. 引用获取失败保留占位；引用只展开一层。
 6. 未知非空消息段保留 `[seg_type]`。
 7. 模型空正文转 `（模型API拒绝回复）`。
-8. 发送无限重发 + `SEND_RETRY_TIMEOUT` 收口；正式回复失败改发备用提示。
+8. 发送循环重发（间隔 `SEND_RETRY_INTERVAL`）+ `SEND_RETRY_TIMEOUT` 收口；正式回复失败改发备用提示。
 9. `FinishedException` 必须重抛。
 10. 原生搜索无可核实统计 → 不显示搜索字段；有搜索能力但未搜 → 同样不显示（Anthropic/Gemini 语义）。
 11. 第三方搜索末轮强制文本回答；全部无结果时显示 `搜索：False`。
@@ -710,7 +714,7 @@ python -m pytest            # 运行仓库内测试套件（见下方）
 | Anthropic | 纯文本、image 块、`thinking` 过滤、官方搜索计数、`search:false` 回退博查、前置 AI 分支 |
 | Gemini | 纯文本、`inlineData`、`googleSearch`、grounding 计数、`thought` 过滤、`search:false` 回退博查、`thoughtSignature`/`id` 回填 |
 | 第三方搜索 | 无工具调用、单轮、多轮、无结果、失败、参数错误 |
-| 发送 | 无限重发 + 10 秒收口、拦截备用提示、存库失败、`finish()` |
+| 发送 | 重发 + 10 秒收口、带失败原因的备用提示、存库失败、`finish()` |
 
 ### 18.1 测试套件（`tests/`）
 

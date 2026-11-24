@@ -26,7 +26,8 @@ def _formal_msg(text="正式正文"):
 # --------------------------------------------------------------------------
 # _send_loop
 # --------------------------------------------------------------------------
-def test_send_loop_retries_until_success(logger):
+def test_send_loop_retries_until_success(logger, monkeypatch):
+    monkeypatch.setattr(ea, "SEND_RETRY_INTERVAL", 0.01)
     matcher = ea.chat_handler
     matcher.fail_sends = 3
     result = run(ea._send_loop(matcher, "msg", "测试"))
@@ -34,6 +35,20 @@ def test_send_loop_retries_until_success(logger):
     assert len(matcher.sent) == 1
     warnings = [m for level, m in logger.records if level == "warning"]
     assert len(warnings) == 3
+
+
+def test_send_loop_records_last_error(monkeypatch):
+    monkeypatch.setattr(ea, "SEND_RETRY_INTERVAL", 0.01)
+    matcher = ea.chat_handler
+    last_error = []
+
+    async def send(msg):
+        raise RuntimeError("napcat 原始错误")
+
+    monkeypatch.setattr(matcher, "send", send)
+    with pytest.raises(asyncio.TimeoutError):
+        run(asyncio.wait_for(ea._send_loop(matcher, "msg", "测试", last_error), timeout=0.05))
+    assert "napcat 原始错误" in str(last_error[0])
 
 
 # --------------------------------------------------------------------------
@@ -60,6 +75,29 @@ def test_formal_reply_saved_and_finishes(temp_db):
     assert len(rows) == 1
     assert "正式正文" in rows[0][0]
     assert matcher.finish_calls == 1
+
+
+def test_timeout_fallback_uses_napcat_reason(temp_db, monkeypatch):
+    monkeypatch.setattr(ea, "SEND_RETRY_TIMEOUT", 0.05)
+    monkeypatch.setattr(ea, "SEND_RETRY_INTERVAL", 0.01)
+    matcher = ea.chat_handler
+    event = FakeEvent(group_id=GROUP, user_id=555)
+    formal = _formal_msg("会被拦截")
+
+    async def send(msg):
+        if msg is formal:
+            raise RuntimeError("napcat: blocked")
+        matcher.sent.append(msg)
+        return {"message_id": "fallback-1"}
+
+    monkeypatch.setattr(matcher, "send", send)
+    fallback = lambda reason: _formal_msg(f"（消息发送失败，原因：{reason}）")
+    with pytest.raises(ea.FinishedException):
+        run(ea.send_and_save(FakeBot(), event, matcher, formal,
+                             is_finish=True, fallback_msg=fallback))
+    rows = run(_chat_rows())
+    assert len(rows) == 1
+    assert "消息发送失败，原因：napcat: blocked" in rows[0][0]
 
 
 def test_send_result_without_message_id_is_not_saved(temp_db):

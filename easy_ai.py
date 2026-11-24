@@ -23,7 +23,8 @@ DYNAMIC_HISTORY_MODEL = "default"   # 决定上下文条数的模型标识 (对�
 
 DYNAMIC_HISTORY_TIMEOUT = 30  # 动态决定历史记录条数(前置AI)的超时时间（秒）
 AI_CHAT_TIMEOUT = 120         # 正式聊天(正式AI)的超时时间（秒）
-SEND_RETRY_TIMEOUT = 10       # 单条消息发送总超时（秒）：期间无限重发，超时判定为发送失败（如敏感词被拦截）
+SEND_RETRY_TIMEOUT = 10       # 单条消息发送总超时（秒）：期间重试，超时判定为发送失败（如敏感词被拦截）
+SEND_RETRY_INTERVAL = 2       # 发送失败后的重试间隔（秒）
 CONTEXT_CACHE_WINDOW = 3600   # 会话延续窗口（秒）：该时长内存在 bot 对话则延续会话并增量追加，不重新决策
 
 # 图片本地缓存目录配置
@@ -964,43 +965,60 @@ async def parse_message_content(bot: Bot, group_id: int, raw_message) -> str:
 
 
 # ========== 辅助函数：统一发送并存入数据库 ==========
-async def _send_loop(matcher, msg, label: str):
-    """无限重发直到成功；由外层 wait_for 超时（SEND_RETRY_TIMEOUT）统一收口。"""
+async def _send_loop(matcher, msg, label: str, last_error: list | None = None):
+    """无限重发直到成功；由外层 wait_for 超时（SEND_RETRY_TIMEOUT）统一收口。
+
+    ``last_error`` 用于把最后一次失败原因带出去，供备用提示原文展示。
+    """
     attempt = 0
     while True:
         attempt += 1
         try:
             return await matcher.send(msg)
         except Exception as e:
+            if last_error is not None:
+                last_error[:] = [e]
             logger.warning(
-                f"[AI Chat] {label}发送失败（第 {attempt} 次）: {type(e).__name__}: {e}，立即重试"
+                f"[AI Chat] {label}发送失败（第 {attempt} 次）: {type(e).__name__}: {e}，"
+                f"{SEND_RETRY_INTERVAL}s 后重试"
             )
+            await asyncio.sleep(SEND_RETRY_INTERVAL)
 
 
 async def send_and_save(bot: Bot, event: GroupMessageEvent, matcher, msg, is_finish: bool = False, fallback_msg=None):
-    # 无限重发直到成功，超过 SEND_RETRY_TIMEOUT 秒仍未成功则视为失败（如敏感词被 NapCat 拦截）
+    # 重试直到成功，超过 SEND_RETRY_TIMEOUT 秒仍未成功则视为失败（如敏感词被 NapCat 拦截）
+    reason = "发送超时"
+    last_error = []
     try:
         send_result = await asyncio.wait_for(
-            _send_loop(matcher, msg, "正式回复" if is_finish else "消息"),
+            _send_loop(
+                matcher,
+                msg,
+                "正式回复" if is_finish else "消息",
+                last_error,
+            ),
             timeout=SEND_RETRY_TIMEOUT,
         )
     except asyncio.TimeoutError:
-        logger.warning(f"[AI Chat] 消息发送超过 {SEND_RETRY_TIMEOUT}s 未成功，进入备用流程")
+        if last_error:
+            reason = str(last_error[0])
+        logger.warning(f"[AI Chat] 消息发送失败，原因：{reason}")
         send_result = None
     sent_msg = msg
     # 发送失败且提供了备用提示时，改发备用提示（同样受超时收口）
     if send_result is None and fallback_msg is not None:
+        fallback = fallback_msg(reason) if callable(fallback_msg) else fallback_msg
         logger.warning("[AI Chat] 消息发送彻底失败，改发备用提示")
         try:
             send_result = await asyncio.wait_for(
-                _send_loop(matcher, fallback_msg, "备用提示"),
+                _send_loop(matcher, fallback, "备用提示"),
                 timeout=SEND_RETRY_TIMEOUT,
             )
         except asyncio.TimeoutError:
             logger.warning("[AI Chat] 备用提示发送也超时，放弃发送")
             send_result = None
         if send_result is not None:
-            sent_msg = fallback_msg
+            sent_msg = fallback
 
     # 仅把“正式回复/提示消息”入库；快速回复“Waiting……”不入库，
     # 否则它会在会话延续时被当成最新边界，导致用户提问被永久跳过
@@ -2858,19 +2876,20 @@ async def handle_ai_chat(bot: Bot, event: Event):
             + "\n"
             + MessageSegment.text(f"{prefix_hint}{completion.reply.text}")
         )
-        # 发送彻底失败时的备用提示：保留 @ 与消息头，正文替换为拦截提示（与空回复格式一致）
-        fallback_msg = (
-            MessageSegment.at(event.user_id)
-            + "\n"
-            + MessageSegment.text(f"{prefix_hint}（消息被拦截，发送失败）")
-        )
+        # 发送失败时的备用提示：保留 @ 与消息头，正文直接放 NapCat 返回的失败原因
+        def build_fallback(reason: str):
+            return (
+                MessageSegment.at(event.user_id)
+                + "\n"
+                + MessageSegment.text(f"{prefix_hint}（消息发送失败，原因：{reason}）")
+            )
         await send_and_save(
             bot,
             event,
             chat_handler,
             msg,
             is_finish=True,
-            fallback_msg=fallback_msg
+            fallback_msg=build_fallback
         )
     except UnsupportedAPITypeError:
         logger.warning(
